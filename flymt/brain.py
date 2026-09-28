@@ -185,7 +185,9 @@ class TorchBrain(nn.Module):
         else:
             a_c, a_b = cont.sample(), binary.sample()
         logp = cont.log_prob(a_c).sum(1) + binary.log_prob(a_b).sum(1)
-        return torch.cat([a_c.clamp(-1, 1), a_b], 1), logp, h
+        # Raw sample (not clipped) so PPO scores exactly the action taken; the
+        # motor system bounds walk/turn itself.
+        return torch.cat([a_c, a_b], 1), logp, h
 
     def log_prob(self, out, action):
         cont, binary = self.distribution(out)
