@@ -36,11 +36,13 @@ def sensory_drive(obs: torch.Tensor) -> torch.Tensor:
     """(B, obs) -> (B, channels): what each sensory neuron group feels."""
     o = lambda k: obs[:, _F[k]]  # noqa: E731
     prox = (1.2 - 2.0 * o("opp_dist")).clamp(0, 1)  # 1 = touching, 0 = far
+    size = (0.1 / o("opp_dist").clamp(min=1e-3)).clamp(max=1)  # apparent size of the rival
     incoming = torch.stack([o(f"opp_{s}") for s in motor.STRIKES], 1).amax(1)
     return torch.stack([
-        # Visual projection neurons that track a nearby fly (LC10-like), per eye.
-        o("opp_bearing_sin").relu() * prox,
-        (-o("opp_bearing_sin")).relu() * prox,
+        # LC10 visual projection neurons track another fly. Each eye covers its
+        # own side and they overlap in front; drive scales with apparent size.
+        (0.5 + o("opp_bearing_sin")).clamp(0, 1) * size,
+        (0.5 - o("opp_bearing_sin")).clamp(0, 1) * size,
         # Looming detectors (LPLC2 / LC4-like): something is coming at us fast.
         (((o("opp_closing_speed") * 2).clamp(0, 1) + incoming) * prox).clamp(max=1),
         # Mechanosensory bristles: being hit.
