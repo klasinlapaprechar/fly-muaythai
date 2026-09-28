@@ -7,3 +7,4 @@ data/connectome/
 checkpoints/
 .env
 .DS_Store
+checkpoints*/

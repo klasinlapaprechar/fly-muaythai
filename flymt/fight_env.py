@@ -33,6 +33,8 @@ OBS_FIELDS = (
     # Proprioception and balance.
     "up", "vel_fwd", "vel_side", "yaw_rate",
     *(f"self_{s}" for s in motor.STRIKES), "rope_dist",
+    # Reward: points this fighter scored in the last tick (drives PAM dopamine neurons).
+    "reward_signal",
 )
 PARTS = ("head", "thorax", "abdomen", "legs")
 
@@ -93,12 +95,14 @@ class FightEnv:
         self.score = {n: Score() for n in arena.FIGHTERS}
         self._down_time = {n: 0.0 for n in arena.FIGHTERS}
         self._landed = {n: False for n in arena.FIGHTERS}  # one hit per strike
+        self._scored = {n: 0.0 for n in arena.FIGHTERS}
         return self.observe()
 
     def step(self, cmds: dict[str, np.ndarray]):
         """Advance one brain tick (10 ms). Returns obs, rewards, done, events."""
         events = []
         rewards = {n: 0.0 for n in arena.FIGHTERS}
+        self._scored = {n: 0.0 for n in arena.FIGHTERS}
         self._touch = {n: np.zeros(4) for n in arena.FIGHTERS}
         dist_before = self._distance()
         for _ in range(int(round(BRAIN_DT / MOTOR_DT))):
@@ -118,6 +122,7 @@ class FightEnv:
                 sc.hits[strike[0]] = sc.hits.get(strike[0], 0) + 1
                 rewards[attacker] += pts
                 rewards[victim] -= pts
+                self._scored[attacker] += pts
                 events.append(("hit", attacker, strike[0], victim, force))
         self.t += BRAIN_DT
 
@@ -130,6 +135,7 @@ class FightEnv:
                 self.score[n].knockdowns += 1
                 rewards[other] += KNOCKDOWN_POINTS
                 rewards[n] -= KNOCKDOWN_POINTS
+                self._scored[other] += KNOCKDOWN_POINTS
                 events.append(("knockdown", other, n))
                 done = True
         # Light shaping: close the distance and face the opponent.
@@ -212,6 +218,7 @@ class FightEnv:
                 R[2, 2], vel[0], vel[1], v[2],
                 *(float(my_active is not None and my_active[0] == s) for s in motor.STRIKES),
                 arena.RING_RADIUS - np.linalg.norm(p[:2]),
+                np.tanh(self._scored[n]),
             ]
             out[n] = np.asarray(o, dtype=np.float32)
         return out

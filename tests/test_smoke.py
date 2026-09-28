@@ -5,8 +5,10 @@ import argparse
 import numpy as np
 import scipy.sparse as sp
 
-from flymt import motor, train
-from flymt.brain import CHANNELS, Brain, Circuit, Layout
+import torch
+
+from flymt import motor, ppo
+from flymt.brain import CHANNELS, Circuit, TorchBrain
 from flymt.fight_env import FightEnv
 
 
@@ -38,23 +40,23 @@ def test_brain_step_and_roundtrip(tmp_path):
     c.save(tmp_path / "c.npz")
     c2 = Circuit.load(tmp_path / "c.npz")
     assert (c2.W != c.W).nnz == 0 and (c2.role == c.role).all()
-    L = Layout(c2)
-    brain = Brain(c2, L, L.init(np.random.default_rng(0)))
-    obs = FightEnv(seed=0).reset()["red"]
+    brain = TorchBrain(c2)
+    obs = torch.from_numpy(FightEnv(seed=0).reset()["red"])[None]
+    h = brain.init_hidden(1)
     for _ in range(10):
-        cmd = brain.step(obs)
-    assert cmd.shape == (len(motor.COMMANDS),)
-    assert np.all((brain.rates >= 0) & (brain.rates <= 1))
+        cmd, logp, h = brain.act(obs, h)
+    assert cmd.shape == (1, len(motor.COMMANDS)) and torch.isfinite(logp).all()
+    assert ((h >= 0) & (h <= 1)).all()
 
 
-def test_es_generation(tmp_path):
+def test_ppo_updates(tmp_path):
     c = synthetic_circuit()
     c.save(tmp_path / "c.npz")
     args = argparse.Namespace(
-        circuit=str(tmp_path / "c.npz"), out=str(tmp_path / "ck"), generations=2,
-        pairs=2, bouts=1, sigma=0.05, lr=0.03, decay=0.005, workers=2, stage=0,
-        save_every=1, seed=0, resume=False)
-    train.EPISODE_SECONDS[0] = 0.3
-    train.train(args)
-    ck = np.load(tmp_path / "ck" / "latest.npz")
-    assert int(ck["gen"]) == 1 and np.isfinite(ck["params"]).all()
+        circuit=str(tmp_path / "c.npz"), out=str(tmp_path / "ck"), updates=2, workers=2,
+        envs_per_worker=1, rollout=16, chunk=8, minibatch=4, epochs=1, lr=3e-4,
+        gamma=0.99, lam=0.95, clip=0.2, vf_coef=0.5, ent_coef=0.01, max_grad=0.5,
+        promote_window=4, stage=0, save_every=1, seed=0, cpu=False, resume=False)
+    ppo.train(args)
+    ck = torch.load(tmp_path / "ck" / "latest.pt")
+    assert ck["update"] == 1 and ck["steps"] == 2 * 16 * 2

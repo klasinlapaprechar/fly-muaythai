@@ -50,8 +50,8 @@ uv pip install -e .
 - [x] Two-fly ring, fly bodies, faster-than-real-time physics
 - [x] Motor system: walking, turning, jab, kick, lunge, clinch, guard
 - [x] Referee: contact-force strike scoring, knockdowns
-- [x] Connectome-constrained rate model + ES trainer (tested on a synthetic circuit)
-- [ ] Load the real male CNS circuit via neuPrint
+- [x] Real fighting circuit from male-cns:v1.0: 6,170 neurons, 370k connections ([image](docs/img/circuit.png))
+- [x] Recurrent PPO: CPU physics workers + backprop through the brain on Apple GPU (MPS)
 - [ ] Training run: bag -> mover -> sparring -> self-play
 - [ ] Neural activity visualization synced to strikes
 

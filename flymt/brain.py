@@ -1,4 +1,4 @@
-"""Connectome-constrained rate model of the fly's fighting circuit.
+"""Connectome-constrained rate model of the fly's fighting circuit (PyTorch).
 
 Wiring (who connects to whom, how many synapses, excitatory or inhibitory) is
 fixed by the connectome. Training only tunes what the connectome does not
@@ -6,52 +6,54 @@ tell us:
     - a gain and bias per cell type (shared by every neuron of that type),
     - how strongly each sensory channel drives its sensory neurons,
     - a linear readout from descending neurons to the motor command vector.
+
+The brain is the PPO policy: descending-neuron activity parameterizes a
+distribution over commands (Gaussian walk/turn, Bernoulli strikes and holds).
 """
 
 from dataclasses import dataclass
 
 import numpy as np
 import scipy.sparse as sp
+import torch
+from torch import nn
 
 from flymt import motor
 from flymt.fight_env import OBS_FIELDS
 
 TAU = 0.02  # s, membrane-ish time constant
-DT = 0.005  # s, brain integration step (2 per 10 ms env tick)
-SUBSTEPS = 2
+DT = 0.005  # s, brain integration step
+SUBSTEPS = 2  # per 10 ms env tick
 
 _F = {k: i for i, k in enumerate(OBS_FIELDS)}
+CHANNELS = ("vis_target_left", "vis_target_right", "looming", "touch_head",
+            "touch_body", "touch_legs", "balance", "aggression", "dopamine")
+N_CONT = 2  # forward, turn
+N_BIN = len(motor.COMMANDS) - N_CONT
 
 
-def _relu(x):
-    return np.maximum(x, 0.0)
-
-
-def _prox(o) -> float:
-    """0 when the opponent is across the ring, 1 when touching."""
-    return float(np.clip(1.2 - 2.0 * o[_F["opp_dist"]], 0, 1))
-
-
-# Sensory channels: each turns observations into a drive for one group of
-# sensory neurons (the group is chosen in connectome.py by cell type).
-CHANNELS = {
-    # Visual projection neurons that track a nearby fly (LC10-like), per eye.
-    "vis_target_left": lambda o: _relu(o[_F["opp_bearing_sin"]]) * _prox(o),
-    "vis_target_right": lambda o: _relu(-o[_F["opp_bearing_sin"]]) * _prox(o),
-    "vis_target_front": lambda o: _relu(o[_F["opp_bearing_cos"]]) * _prox(o),
-    # Looming detectors (LPLC2 / LC4-like): something is coming at us fast.
-    "looming": lambda o: min(1.0, (np.clip(o[_F["opp_closing_speed"]] * 2, 0, 1)
-                                   + max(o[_F[f"opp_{s}"]] for s in motor.STRIKES))
-                             * _prox(o)),
-    # Mechanosensory bristles: being hit.
-    "touch_head": lambda o: o[_F["touch_head"]],
-    "touch_body": lambda o: max(o[_F["touch_thorax"]], o[_F["touch_abdomen"]]),
-    "touch_legs": lambda o: o[_F["touch_legs"]],
-    # Gravity / balance (Johnston's organ-like): tilted or flipped.
-    "balance": lambda o: float(np.clip(1 - o[_F["up"]], 0, 1)),
-    # Male aggression drive (P1-like), tonic during a bout.
-    "aggression": lambda o: 1.0,
-}
+def sensory_drive(obs: torch.Tensor) -> torch.Tensor:
+    """(B, obs) -> (B, channels): what each sensory neuron group feels."""
+    o = lambda k: obs[:, _F[k]]  # noqa: E731
+    prox = (1.2 - 2.0 * o("opp_dist")).clamp(0, 1)  # 1 = touching, 0 = far
+    incoming = torch.stack([o(f"opp_{s}") for s in motor.STRIKES], 1).amax(1)
+    return torch.stack([
+        # Visual projection neurons that track a nearby fly (LC10-like), per eye.
+        o("opp_bearing_sin").relu() * prox,
+        (-o("opp_bearing_sin")).relu() * prox,
+        # Looming detectors (LPLC2 / LC4-like): something is coming at us fast.
+        (((o("opp_closing_speed") * 2).clamp(0, 1) + incoming) * prox).clamp(max=1),
+        # Mechanosensory bristles: being hit.
+        o("touch_head"),
+        torch.maximum(o("touch_thorax"), o("touch_abdomen")),
+        o("touch_legs"),
+        # Gravity / balance (Johnston's organ-like): tilted or flipped.
+        (1 - o("up")).clamp(0, 1),
+        # Male aggression drive (pC1 / P1-class), tonic during a bout.
+        torch.ones_like(prox),
+        # Reward: PAM dopamine neurons fire when this fly scores.
+        o("reward_signal").clamp(0, 1),
+    ], 1)
 
 
 @dataclass
@@ -61,7 +63,7 @@ class Circuit:
     body_id: np.ndarray  # (N,) int64 neuPrint bodyId
     type: np.ndarray  # (N,) str cell type
     side: np.ndarray  # (N,) str "L" / "R" / ""
-    role: np.ndarray  # (N,) str: a CHANNELS key, "dn", or "inter"
+    role: np.ndarray  # (N,) str: a CHANNELS name, "dn", or "inter"
     soma_xyz: np.ndarray  # (N, 3) float, nm; NaN where unknown
     W: sp.csr_matrix  # (N, N) post x pre, signed synapse counts
     dataset: str = ""
@@ -85,85 +87,104 @@ class Circuit:
                    str(f["dataset"]))
 
 
-class Layout:
-    """Where each trainable parameter lives in the flat vector ES optimizes."""
+def _to_torch_sparse(m: sp.spmatrix) -> torch.Tensor:
+    m = m.tocoo()
+    idx = torch.from_numpy(np.vstack([m.row, m.col]).astype(np.int64))
+    return torch.sparse_coo_tensor(idx, torch.from_numpy(m.data.astype(np.float32)),
+                                   m.shape).coalesce()
 
-    def __init__(self, c: Circuit):
-        self.types, self.type_idx = np.unique(c.type, return_inverse=True)
-        self.channels = list(CHANNELS)
-        dn = np.flatnonzero(c.role == "dn")
-        # Read out from DN types with left and right kept apart (turning needs it).
-        keys = [f"{c.type[i]}|{c.side[i]}" for i in dn]
-        self.dn_keys, dn_group = np.unique(keys, return_inverse=True)
-        pool = sp.csr_matrix((np.ones(len(dn)), (dn_group, dn)),
-                             shape=(len(self.dn_keys), c.n))
-        counts = np.asarray(pool.sum(1)).ravel()
-        self.dn_pool = (sp.diags(1 / counts) @ pool).tocsr()  # mean rate per group
-        self.sensory = {ch: np.flatnonzero(c.role == ch) for ch in self.channels}
-        self.n_dn, self.n_cmd = len(self.dn_keys), len(motor.COMMANDS)
-        sizes = (("gain", len(self.types)), ("bias", len(self.types)),
-                 ("input", len(self.channels)), ("w_scale", 1),
-                 ("readout", self.n_cmd * self.n_dn), ("readout_b", self.n_cmd))
-        self.slices, at = {}, 0
-        for name, size in sizes:
-            self.slices[name] = slice(at, at + size)
-            at += size
-        self.size = at
 
-    def init(self, rng: np.random.Generator) -> np.ndarray:
-        p = np.zeros(self.size)
-        p[self.slices["input"]] = 1.0
-        ro = rng.normal(0, 0.3, (self.n_cmd, self.n_dn))
-        # Seed with what biology already tells us about a few DN types.
+class TorchBrain(nn.Module):
+    def __init__(self, circuit: Circuit):
+        super().__init__()
+        self.c = circuit
+        types, type_idx = np.unique(circuit.type, return_inverse=True)
+        self.types = types
+        self.register_buffer("type_idx", torch.from_numpy(type_idx.astype(np.int64)))
+        # Normalize each neuron's total input so wiring scale is comparable.
+        W = circuit.W.astype(np.float64)
+        in_abs = np.asarray(abs(W).sum(1)).ravel()
+        self.register_buffer("W", _to_torch_sparse(sp.diags(1 / np.sqrt(in_abs + 1)) @ W))
+        # Sensory neurons: which channel (if any) drives each neuron.
+        S = np.zeros((len(CHANNELS), circuit.n), np.float32)
+        for k, ch in enumerate(CHANNELS):
+            S[k, circuit.role == ch] = 1.0
+        self.register_buffer("S", torch.from_numpy(S))
+        # Descending neurons pooled by type and side (turning needs L vs R).
+        dn = np.flatnonzero(circuit.role == "dn")
+        keys = np.array([f"{circuit.type[i]}|{circuit.side[i]}" for i in dn])
+        self.dn_keys, group = np.unique(keys, return_inverse=True)
+        counts = np.bincount(group)
+        pool = sp.csr_matrix((1 / counts[group], (group, dn)),
+                             shape=(len(self.dn_keys), circuit.n))
+        self.register_buffer("P", _to_torch_sparse(pool))
+
+        n_t, n_dn, n_cmd = len(types), len(self.dn_keys), len(motor.COMMANDS)
+        self.log_gain = nn.Parameter(torch.zeros(n_t))
+        self.bias = nn.Parameter(torch.zeros(n_t))
+        self.input_gain = nn.Parameter(torch.ones(len(CHANNELS)))
+        self.w_scale = nn.Parameter(torch.zeros(()))
+        self.readout = nn.Linear(n_dn, n_cmd)
+        self.log_std = nn.Parameter(torch.full((N_CONT,), -0.5))
+        self._seed_readout()
+
+    @torch.no_grad()
+    def _seed_readout(self):
+        """Start from what biology already tells us about a few DN types."""
+        nn.init.normal_(self.readout.weight, 0, 0.3)
+        nn.init.zeros_(self.readout.bias)
+        self.readout.bias[N_CONT:] = -2.0  # strikes start rare, not spammed
         cmd = {k: i for i, k in enumerate(motor.COMMANDS)}
         for j, key in enumerate(self.dn_keys):
             t, side = key.split("|")
             if t.startswith("DNa02"):  # steering: left DNa02 turns left
-                ro[cmd["turn"], j] += 2.0 if side == "L" else -2.0
+                self.readout.weight[cmd["turn"], j] += 2.0 if side == "L" else -2.0
             if t.startswith(("DNp09", "oDN1")):  # forward walking
-                ro[cmd["forward"], j] += 2.0
+                self.readout.weight[cmd["forward"], j] += 2.0
             if t.startswith("MDN"):  # moonwalker: backward walking
-                ro[cmd["forward"], j] -= 2.0
-        p[self.slices["readout"]] = ro.ravel()
-        return p
+                self.readout.weight[cmd["forward"], j] -= 2.0
 
+    def init_hidden(self, batch: int) -> torch.Tensor:
+        return torch.zeros(batch, self.c.n, device=self.S.device)
 
-class Brain:
-    """Simulates the circuit and turns descending-neuron activity into commands."""
-
-    def __init__(self, circuit: Circuit, layout: Layout, params: np.ndarray):
-        self.c, self.L = circuit, layout
-        s = layout.slices
-        gain = np.exp(np.clip(params[s["gain"]], -3, 3))[layout.type_idx]
-        self.bias = params[s["bias"]][layout.type_idx]
-        # Normalize each neuron's total input so wiring scale is comparable
-        # across neurons, then apply the per-type gain on the postsynaptic side.
-        W = circuit.W.astype(np.float64)
-        in_abs = np.asarray(abs(W).sum(1)).ravel()
-        norm = 1.0 / np.sqrt(in_abs + 1.0)
-        self.W = (sp.diags(gain * norm * np.exp(params[s["w_scale"]][0])) @ W).tocsr()
-        self.input_gain = params[s["input"]]
-        self.readout = params[s["readout"]].reshape(layout.n_cmd, layout.n_dn)
-        self.readout_b = params[s["readout_b"]]
-        self.reset()
-
-    def reset(self):
-        self.rates = np.zeros(self.c.n)
-        self.dn = np.zeros(self.L.n_dn)
-
-    def step(self, obs: np.ndarray) -> np.ndarray:
-        drive = np.zeros(self.c.n)
-        for k, ch in enumerate(self.L.channels):
-            idx = self.L.sensory[ch]
-            if len(idx):
-                drive[idx] = self.input_gain[k] * CHANNELS[ch](obs)
-        alpha = DT / TAU
+    def forward(self, obs: torch.Tensor, h: torch.Tensor):
+        """One 10 ms tick. obs (B, F), h (B, N) -> (mean, log_std, logits), h."""
+        drive = (sensory_drive(obs) * self.input_gain) @ self.S  # (B, N)
+        gain = torch.exp(self.log_gain.clamp(-3, 3))[self.type_idx] * torch.exp(self.w_scale)
+        bias = self.bias[self.type_idx]
+        r = h.T  # (N, B) for sparse matmul
         for _ in range(SUBSTEPS):
-            x = self.W @ self.rates + self.bias + drive
-            self.rates += alpha * (np.tanh(_relu(x)) - self.rates)
-        self.dn = self.L.dn_pool @ self.rates
-        z = self.readout @ self.dn + self.readout_b
-        cmd = np.empty(self.L.n_cmd)
-        cmd[:2] = np.tanh(z[:2])  # forward, turn
-        cmd[2:] = 1 / (1 + np.exp(-z[2:]))  # strike / hold drive
-        return cmd
+            x = gain[:, None] * torch.sparse.mm(self.W, r) + bias[:, None] + drive.T
+            r = r + (DT / TAU) * (torch.tanh(x.relu()) - r)
+        h = r.T
+        dn = torch.sparse.mm(self.P, r).T  # (B, n_dn)
+        z = self.readout(dn)
+        return (torch.tanh(z[:, :N_CONT]), self.log_std.expand(len(z), -1),
+                z[:, N_CONT:]), h
+
+    @staticmethod
+    def distribution(out):
+        mean, log_std, logits = out
+        return (torch.distributions.Normal(mean, log_std.exp()),
+                torch.distributions.Bernoulli(logits=logits))
+
+    @torch.no_grad()
+    def act(self, obs: torch.Tensor, h: torch.Tensor, deterministic: bool = False):
+        """Sample commands. Returns (cmd (B, n_cmd), log_prob (B,), h)."""
+        out, h = self(obs, h)
+        cont, binary = self.distribution(out)
+        if deterministic:
+            a_c, a_b = out[0], (out[2] > 0).float()
+        else:
+            a_c, a_b = cont.sample(), binary.sample()
+        logp = cont.log_prob(a_c).sum(1) + binary.log_prob(a_b).sum(1)
+        return torch.cat([a_c.clamp(-1, 1), a_b], 1), logp, h
+
+    def log_prob(self, out, action):
+        cont, binary = self.distribution(out)
+        return (cont.log_prob(action[:, :N_CONT]).sum(1)
+                + binary.log_prob(action[:, N_CONT:]).sum(1))
+
+    def entropy(self, out):
+        cont, binary = self.distribution(out)
+        return cont.entropy().sum(1) + binary.entropy().sum(1)
