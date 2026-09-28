@@ -26,7 +26,9 @@ from flymt.fight_env import OBS_FIELDS, FightEnv
 
 EPISODE_SECONDS = {0: 3.0, 1: 3.0, 2: 4.0, 3: 6.0}
 # Promote when the mean net score (points landed - taken) per bout reaches this.
-PROMOTE_AT = {0: 3.0, 1: 3.0, 2: 2.0}
+PROMOTE_AT = {0: 3.0, 1: 3.0, 2: 8.0}
+# ...and, where listed, throw at most this many strikes per bout (accuracy, not spam).
+MAX_THROWS_TO_PROMOTE = {2: 15.0}
 
 
 # --------------------------------------------------------------- fight workers
@@ -142,7 +144,12 @@ def train(args):
         critic.load_state_dict(ck["critic"])
         opt.load_state_dict(ck["opt"])
         stage, update0, steps = ck["stage"], ck["update"] + 1, ck["steps"]
+        if args.set_stage is not None:
+            stage = args.set_stage
         print(f"resumed at update {update0}, stage {opponents.STAGES[stage]}")
+        with open(out / "events.txt", "a") as ev:
+            ev.write(f"update {update0}: resumed at stage {opponents.STAGES[stage]}"
+                     f"{' - ' + args.note if args.note else ''}\n")
     print(f"device {dev} | circuit: {circuit.n} real neurons, {circuit.W.nnz} connections, "
           f"{len(brain.types)} cell types, {len(brain.dn_keys)} DN groups | "
           f"{sum(p.numel() for p in brain.parameters())} trainable brain parameters "
@@ -274,8 +281,10 @@ def train(args):
             torch.save(ck, out / f"update_{update:04d}.pt")
 
         net = [f["landed"] - f["taken"] for f in recent]
+        throws = np.mean([f["throws"] for f in recent]) if recent else np.inf
         if (stage in PROMOTE_AT and len(recent) == recent.maxlen
-                and np.mean(net) >= PROMOTE_AT[stage]):
+                and np.mean(net) >= PROMOTE_AT[stage]
+                and throws <= MAX_THROWS_TO_PROMOTE.get(stage, np.inf)):
             torch.save(ck, out / f"graduated_{opponents.STAGES[stage]}.pt")
             stage += 1
             recent.clear()
@@ -314,6 +323,9 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--cpu", action="store_true", help="train on CPU instead of MPS")
     ap.add_argument("--resume", action="store_true")
+    ap.add_argument("--set-stage", type=int, default=None, choices=range(4),
+                    help="with --resume: override the saved curriculum stage")
+    ap.add_argument("--note", default="", help="with --resume: note for checkpoints/events.txt")
     train(ap.parse_args())
 
 

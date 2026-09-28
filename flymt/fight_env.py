@@ -21,6 +21,7 @@ TOUCH_SCALE = 0.05  # force that saturates the touch sensors
 KNOCKDOWN_UP = 0.3  # thorax "up" z below this = on its side or back
 KNOCKDOWN_SECONDS = 0.15
 KNOCKDOWN_POINTS = 5.0
+STRIKE_COST = 0.2  # per strike thrown: fatigue, so accuracy beats spamming
 APPROACH_REWARD = 5.0  # per cm closed
 FACING_REWARD = 0.01  # per tick, scaled by cos(bearing)
 IN_RANGE_REWARD = 0.02  # per tick within striking range and facing
@@ -114,6 +115,7 @@ class FightEnv:
             for n, s in started.items():
                 if s:
                     self._landed[n] = False
+                    rewards[n] -= STRIKE_COST
                     events.append(("throw", n, s))
             for attacker, victim, force in self._scan_hits():
                 strike = self.motor[attacker].active
