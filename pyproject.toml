@@ -1,0 +1,24 @@
+[project]
+name = "fly-muaythai"
+version = "0.1.0"
+description = "A connectome-constrained fruit fly brain that learns Muay Thai in MuJoCo."
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "mujoco>=3.2",
+    "dm_control>=1.0.20",
+    "flybody @ git+https://github.com/TuragaLab/flybody.git",
+    "numpy<2",
+    "pandas",
+    "matplotlib",
+    "imageio",
+    "imageio-ffmpeg",
+    "neuprint-python",
+    "torch",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["flymt"]
