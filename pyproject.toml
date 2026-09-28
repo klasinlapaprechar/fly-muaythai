@@ -13,7 +13,7 @@ dependencies = [
     "imageio",
     "imageio-ffmpeg",
     "neuprint-python",
-    "torch",
+    "scipy",
 ]
 
 [build-system]
@@ -22,3 +22,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = ["flymt"]
+
+[project.optional-dependencies]
+dev = ["pytest"]
