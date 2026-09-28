@@ -144,7 +144,8 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--circuit", default="data/connectome/circuit.npz")
     ap.add_argument("--ckpt", default=None, help="checkpoint .pt (omit = untrained brain)")
-    ap.add_argument("--stage", type=int, default=2, help="0 bag, 1 mover, 2 sparring")
+    ap.add_argument("--stage", type=int, default=2,
+                    help="0 bag, 1 mover, 2 sparring; -1 = the checkpoint's training stage")
     ap.add_argument("--seconds", type=float, default=4.0)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--sample", action="store_true", help="sample actions instead of greedy")
@@ -152,6 +153,8 @@ def main():
     ap.add_argument("--stills", default="docs/img")
     args = ap.parse_args()
     circuit = Circuit.load(args.circuit)
+    if args.stage < 0:  # fight whatever the checkpoint is training against
+        args.stage = int(torch.load(args.ckpt, map_location="cpu")["stage"]) if args.ckpt else 0
     frames, rates, cmds, events, score = record_bout(
         circuit, args.ckpt, args.stage, args.seconds, args.seed, args.sample)
     out = Path(args.out)
