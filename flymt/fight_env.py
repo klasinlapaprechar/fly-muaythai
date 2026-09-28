@@ -21,13 +21,17 @@ TOUCH_SCALE = 0.05  # force that saturates the touch sensors
 KNOCKDOWN_UP = 0.3  # thorax "up" z below this = on its side or back
 KNOCKDOWN_SECONDS = 0.15
 KNOCKDOWN_POINTS = 5.0
+APPROACH_REWARD = 5.0  # per cm closed
+FACING_REWARD = 0.01  # per tick, scaled by cos(bearing)
+IN_RANGE_REWARD = 0.02  # per tick within striking range and facing
+RANGE_CM = 0.25
 
 OBS_FIELDS = (
     # Vision: where the opponent is (egocentric).
     "opp_dist", "opp_bearing_sin", "opp_bearing_cos", "opp_elev",
     "opp_facing_sin", "opp_facing_cos", "opp_closing_speed",
     # Vision: what the opponent is doing (motion cues of an incoming strike).
-    *(f"opp_{s}" for s in motor.STRIKES), "opp_guard", "opp_clinch",
+    *(f"opp_{s}" for s in motor.STRIKES), "opp_guard", "opp_clinch", "opp_box",
     # Mechanosensation: being touched / hit.
     "touch_head", "touch_thorax", "touch_abdomen", "touch_legs",
     # Proprioception and balance.
@@ -138,10 +142,15 @@ class FightEnv:
                 self._scored[other] += KNOCKDOWN_POINTS
                 events.append(("knockdown", other, n))
                 done = True
-        # Light shaping: close the distance and face the opponent.
-        closing = dist_before - self._distance()
+        # Shaping so there is something to learn before the first hit lands:
+        # close the distance, face the opponent, and hold fighting range.
+        dist = self._distance()
+        closing = dist_before - dist
         for n in arena.FIGHTERS:
-            rewards[n] += 2.0 * closing + 0.002 * self._facing(n)
+            facing = self._facing(n)
+            rewards[n] += APPROACH_REWARD * closing + FACING_REWARD * facing
+            if dist < RANGE_CM and facing > 0.8:
+                rewards[n] += IN_RANGE_REWARD
         return self.observe(), rewards, done, events
 
     def _motor_tick(self, cmds) -> dict[str, str | None]:
@@ -214,6 +223,7 @@ class FightEnv:
                 *(float(opp_active is not None and opp_active[0] == s) for s in motor.STRIKES),
                 float(oc[motor.COMMANDS.index("guard")] > 0.5),
                 float(oc[motor.COMMANDS.index("clinch")] > 0.5),
+                float(oc[motor.COMMANDS.index("box")] > 0.5),
                 *np.tanh(self._touch[n] / TOUCH_SCALE),
                 R[2, 2], vel[0], vel[1], v[2],
                 *(float(my_active is not None and my_active[0] == s) for s in motor.STRIKES),

@@ -28,6 +28,7 @@ SUBSTEPS = 2  # per 10 ms env tick
 _F = {k: i for i, k in enumerate(OBS_FIELDS)}
 CHANNELS = ("vis_target_left", "vis_target_right", "looming", "touch_head",
             "touch_body", "touch_legs", "balance", "aggression", "dopamine")
+DN_REST_BIAS = -0.5
 N_CONT = 2  # forward, turn
 N_BIN = len(motor.COMMANDS) - N_CONT
 
@@ -129,13 +130,19 @@ class TorchBrain(nn.Module):
         self.readout = nn.Linear(n_dn, n_cmd)
         self.log_std = nn.Parameter(torch.full((N_CONT,), -0.5))
         self._seed_readout()
+        with torch.no_grad():
+            # Descending neurons are quiet at rest in real flies; start them there.
+            is_dn = np.zeros(n_t, bool)
+            is_dn[np.unique(type_idx[circuit.role == "dn"])] = True
+            self.bias[torch.from_numpy(is_dn)] = DN_REST_BIAS
 
     @torch.no_grad()
     def _seed_readout(self):
         """Start from what biology already tells us about a few DN types."""
-        nn.init.normal_(self.readout.weight, 0, 0.3)
+        # Scale by fan-in so ~1000 DN groups don't sum to saturated commands.
+        nn.init.normal_(self.readout.weight, 0, 0.3 / np.sqrt(self.readout.in_features))
         nn.init.zeros_(self.readout.bias)
-        self.readout.bias[N_CONT:] = -2.0  # strikes start rare, not spammed
+        self.readout.bias[N_CONT:] = -3.5  # strikes start rare, not spammed
         cmd = {k: i for i, k in enumerate(motor.COMMANDS)}
         for j, key in enumerate(self.dn_keys):
             t, side = key.split("|")
@@ -143,8 +150,6 @@ class TorchBrain(nn.Module):
                 self.readout.weight[cmd["turn"], j] += 2.0 if side == "L" else -2.0
             if t.startswith(("DNp09", "oDN1")):  # forward walking
                 self.readout.weight[cmd["forward"], j] += 2.0
-            if t.startswith("MDN"):  # moonwalker: backward walking
-                self.readout.weight[cmd["forward"], j] -= 2.0
 
     def init_hidden(self, batch: int) -> torch.Tensor:
         return torch.zeros(batch, self.c.n, device=self.S.device)

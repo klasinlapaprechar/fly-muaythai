@@ -306,7 +306,7 @@ def main():
     ap.add_argument("--lam", type=float, default=0.95)
     ap.add_argument("--clip", type=float, default=0.2)
     ap.add_argument("--vf-coef", type=float, default=0.5)
-    ap.add_argument("--ent-coef", type=float, default=0.01)
+    ap.add_argument("--ent-coef", type=float, default=0.003)
     ap.add_argument("--max-grad", type=float, default=0.5)
     ap.add_argument("--promote-window", type=int, default=48)
     ap.add_argument("--stage", type=int, default=0, choices=range(4))

@@ -12,6 +12,8 @@ Command vector (all floats):
     lunge             rear up and slam forward, the fly's "knee"
     clinch            forelegs grab + claw adhesion while > 0.5
     guard             forelegs raised in front while > 0.5
+    box               rear up on mid + hind legs, forelegs up (the boxing
+                      stance real male flies fight in) while > 0.5
 """
 
 from dataclasses import dataclass
@@ -24,7 +26,7 @@ from flymt.arena import FighterIndex
 from flymt.ik import IK_JOINTS, LEGS, LegIK
 
 COMMANDS = ("forward", "turn", "jab_l", "jab_r", "kick_l", "kick_r",
-            "lunge", "clinch", "guard")
+            "lunge", "clinch", "guard", "box")
 STRIKES = ("jab_l", "jab_r", "kick_l", "kick_r", "lunge")
 
 GROUND_Z = -0.124  # claw height at rest, thorax frame
@@ -34,6 +36,8 @@ GAIT_HZ = 10.0
 N_PHASE = 32
 STRIDE_SCALES = np.linspace(-1, 1, 5)
 TRIPOD_A = ("T1_left", "T2_right", "T3_left")
+MIN_HOLD_SECONDS = 0.15  # a posture, once taken or dropped, is kept at least this long
+POSE_TAU = 0.01  # s, muscle-like smoothing of joint targets
 CACHE = Path(__file__).resolve().parent.parent / "cache" / "motor_tables.npz"
 
 
@@ -71,9 +75,12 @@ MOVES = {
         (1.0, ((0.09, 0.087, GROUND_Z), (-0.181, 0.105, GROUND_Z))),
     ), duration=0.15, bilateral=True),
 }
+# Held postures: claw targets per leg segment (left side; mirrored for right).
 HOLDS = {
-    "clinch": (0.2, 0.045, -0.03),  # forelegs reach forward to grab
-    "guard": (0.14, 0.05, 0.0),  # forelegs up in front of the head
+    "clinch": {"T1": (0.2, 0.045, -0.03)},  # forelegs reach forward to grab
+    "guard": {"T1": (0.14, 0.05, 0.0)},  # forelegs up in front of the head
+    # Mid legs extend, hind legs crouch: the body pitches ~38 deg head-up.
+    "box": {"T1": (0.10, 0.04, 0.10), "T2": (0.0, 0.15, -0.22), "T3": (-0.15, 0.13, -0.09)},
 }
 
 
@@ -129,12 +136,13 @@ def build_tables(model: mujoco.MjModel, verbose: bool = False) -> dict[str, np.n
                             print(f"  {name}_{side} key{ki} {leg}: residual {r:.3f} cm")
                         arr[ki, LEGS.index(leg)] = [ang[j] for j in IK_JOINTS]
             tables[f"move_{name}_{side}"] = arr
-    for name, p in HOLDS.items():
+    for name, targets in HOLDS.items():
         arr = standing.copy()
-        for sd in "lr":
-            leg = _leg("T1", sd)
-            ang, _ = ik.solve(leg, _flip(p, sd))
-            arr[LEGS.index(leg)] = [ang[j] for j in IK_JOINTS]
+        for seg, p in targets.items():
+            for sd in "lr":
+                leg = _leg(seg, sd)
+                ang, _ = ik.solve(leg, _flip(p, sd))
+                arr[LEGS.index(leg)] = [ang[j] for j in IK_JOINTS]
         tables[f"hold_{name}"] = arr
     return tables
 
@@ -162,6 +170,9 @@ class MotorSystem:
 
     def reset(self):
         self.phase = 0.0
+        self.hold: str | None = None
+        self.hold_age = MIN_HOLD_SECONDS
+        self.pose_f: np.ndarray | None = None
         self.active: tuple[str, float] | None = None  # (strike, elapsed seconds)
         self.prev_cmd = np.zeros(len(COMMANDS))
 
@@ -201,12 +212,19 @@ class MotorSystem:
             in_stance = ((self.phase + offset) % 1.0) < 0.5 or speed < 0.05
             adhesion[li] = 0.6 if in_stance else 0.0
 
-        # Held postures take over the forelegs.
-        for hold in ("clinch", "guard"):
-            if c[hold] > 0.5:
-                pose[:2] = self.t[f"hold_{hold}"][:2]
-                adhesion[:2] = 1.0 if hold == "clinch" else 0.0
-                break
+        # Held postures take over the legs they name (first match wins), with a
+        # minimum dwell time so postures cannot flicker on and off every tick.
+        wanted = next((h for h in ("box", "clinch", "guard") if c[h] > 0.5), None)
+        self.hold_age += dt
+        if wanted != self.hold and self.hold_age >= MIN_HOLD_SECONDS:
+            self.hold, self.hold_age = wanted, 0.0
+        if self.hold:
+            for seg in HOLDS[self.hold]:
+                for sd in "lr":
+                    li = LEGS.index(_leg(seg, sd))
+                    pose[li] = self.t[f"hold_{self.hold}"][li]
+                    adhesion[li] = (1.0 if self.hold == "clinch" else
+                                    0.0 if seg == "T1" else 0.6)
 
         if self.active is not None:
             name, el = self.active
@@ -224,10 +242,20 @@ class MotorSystem:
                 for seg in mv.legs:
                     for sd in ("lr" if mv.bilateral else side):
                         li = LEGS.index(_leg(seg, sd))
-                        pose[li] = (1 - w) * arr[k, li] + w * arr[k + 1, li]
+                        a, b = arr[k, li], arr[k + 1, li]
+                        # Strikes start and end from the current posture (e.g. the
+                        # boxing stance) rather than dropping to the ground pose.
+                        if k == 0:
+                            a = pose[li]
+                        if k + 1 == len(times) - 1:
+                            b = pose[li]
+                        pose[li] = (1 - w) * a + w * b
                         adhesion[li] = 0.0
                 self.active = (name, el + dt)
 
-        ctrl[self.joint_ctrl] = pose
+        if self.pose_f is None:
+            self.pose_f = pose.copy()
+        self.pose_f += min(1.0, dt / POSE_TAU) * (pose - self.pose_f)
+        ctrl[self.joint_ctrl] = self.pose_f
         ctrl[self.adhesion_ctrl] = adhesion
         return started
