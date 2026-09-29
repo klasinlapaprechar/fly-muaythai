@@ -39,6 +39,10 @@ UNFACED_STRIKE_PENALTY = 0.3  # throwing a strike while not facing within 45 deg
 # Orienting stage: the reward is only about keeping the opponent dead ahead.
 ORIENT_REWARD = 0.02  # per tick, scaled by cos(bearing)
 ORIENT_AWAY_PENALTY = 0.02  # per tick with the opponent behind
+# cos(bearing) is nearly flat near dead ahead (15 deg off still earns 97%), so add
+# a sharp bonus for precise aim: full at 0 deg, ~37% at 15 deg, ~0 beyond 30 deg.
+ORIENT_PRECISION_REWARD = 0.03  # per tick
+ORIENT_PRECISION_RAD = 0.26  # ~15 deg
 ENGAGED_CM = 0.5
 CIRCLE_REWARD = 0.01  # per tick of sideways movement around the opponent, in range and facing
 CIRCLE_SPEED = 0.3  # cm/s of sideways speed that earns the full circling reward
@@ -220,7 +224,9 @@ class FightEnv:
                 facing = self._facing(n)
                 kd = (KNOCKDOWN_POINTS if any(e[0] == "knockdown" and e[2] == n for e in events)
                       else 0.0)
+                angle = float(np.arccos(np.clip(facing, -1.0, 1.0)))
                 rewards[n] = (ORIENT_REWARD * facing
+                              + ORIENT_PRECISION_REWARD * np.exp(-(angle / ORIENT_PRECISION_RAD) ** 2)
                               - (ORIENT_AWAY_PENALTY if facing < 0 else 0.0) - kd)
             return self.observe(), rewards, done, events
         # Fight-craft shaping, scored on each fighter's own movement.

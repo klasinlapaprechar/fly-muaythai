@@ -33,6 +33,7 @@ MAX_THROWS_TO_PROMOTE = {SPARRING: 15.0}
 # Orienting graduation: mean facing (cos of bearing) per bout, and the steering test.
 ORIENT_FACING = 0.8
 STEER_MIN = 0.5  # turn command magnitude required at +-45 and +-90 deg, correct sign
+STEER_CENTER_MAX = 0.3  # |turn| allowed with the opponent dead ahead
 
 
 def steering_test(brain: TorchBrain) -> dict[int, float]:
@@ -53,8 +54,12 @@ def steering_test(brain: TorchBrain) -> dict[int, float]:
 
 
 def steering_ok(turns: dict[int, float]) -> bool:
-    return all(turns[d] >= STEER_MIN for d in (45, 90)) and all(
-        turns[d] <= -STEER_MIN for d in (-45, -90))
+    """Strong correct turns when far off, correct direction when slightly off,
+    and roughly no turn when the opponent is dead ahead."""
+    return (all(turns[d] >= STEER_MIN for d in (45, 90))
+            and all(turns[d] <= -STEER_MIN for d in (-45, -90))
+            and turns[15] > 0 > turns[-15]
+            and abs(turns[0]) <= STEER_CENTER_MAX)
 
 
 # --------------------------------------------------------------- fight workers
