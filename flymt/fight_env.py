@@ -39,8 +39,8 @@ CIRCLE_REWARD = 0.01  # per tick of sideways movement around the opponent, in ra
 CIRCLE_SPEED = 0.3  # cm/s of sideways speed that earns the full circling reward
 DEFEND_REWARD = 0.5  # opponent's strike misses while within striking range (slipped)
 BLOCK_BONUS = 0.3  # ...and it was thrown into a guard or boxing stance (blocked)
-RETREAT_GRACE = 1.2  # s of continuous backing off that is just footwork
-RETREAT_PENALTY = 0.02  # per tick of excessive backing up beyond that
+RETREAT_GRACE = 1.0  # s of backing off *without throwing a strike* before it counts as running
+RETREAT_PENALTY = 0.02  # per tick of running (retreating without fighting back)
 PASSIVE_SECONDS = 1.0  # within ENGAGED_CM, going this long without a strike...
 PASSIVE_PENALTY = 0.03  # ...costs this per tick
 
@@ -130,6 +130,7 @@ class FightEnv:
         self._scored = {n: 0.0 for n in arena.FIGHTERS}
         self._touch = {n: np.zeros(4) for n in arena.FIGHTERS}
         pos_before = {n: self._frame(n)[0][:2].copy() for n in arena.FIGHTERS}
+        threw = set()
         for _ in range(int(round(BRAIN_DT / MOTOR_DT))):
             before = {n: self.motor[n].active for n in arena.FIGHTERS}
             started = self._motor_tick(cmds)
@@ -151,6 +152,7 @@ class FightEnv:
                 if s:
                     self._landed[n] = False
                     self._since_strike[n] = 0.0
+                    threw.add(n)
                     rewards[n] -= STRIKE_COST
                     events.append(("throw", n, s))
             for attacker, victim, force, part in self._scan_hits():
@@ -206,9 +208,12 @@ class FightEnv:
                 r += CIRCLE_REWARD * min(sideways / CIRCLE_SPEED, 1.0)
                 if self.motor[n].hold == "box":
                     r += BOX_STANCE_REWARD
-            # Running: backing off for too long.
+            # Running: backing off without fighting back. Retreating while still
+            # throwing strikes is fine (fighting off the back foot), so any strike
+            # resets the clock, as does stopping or coming forward.
+            retreating = toward < -0.05 * BRAIN_DT
             self._retreat_time[n] = (self._retreat_time[n] + BRAIN_DT
-                                     if toward < -0.05 * BRAIN_DT else 0.0)
+                                     if retreating and n not in threw else 0.0)
             if self._retreat_time[n] > RETREAT_GRACE:
                 r -= RETREAT_PENALTY
             # Not fighting back: in range but no strikes for too long.
