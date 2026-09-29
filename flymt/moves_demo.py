@@ -1,7 +1,7 @@
 """Render every move in the fly's repertoire on its own, slowed down and labeled.
 
 Usage:
-    python -m flymt.moves_demo        # out/videos/moves.mp4 + docs/img/moves.png
+    python -m flymt.moves_demo        # out/videos/moves.mp4 + out/videos/moves.png
 """
 
 from pathlib import Path
@@ -149,8 +149,8 @@ def main():
             writer.append_data(frame)
         peaks.append(best)
     writer.close()
-    _contact_sheet(peaks, Path("docs/img/moves.png"))
-    print(f"saved {out} and docs/img/moves.png ({len(MOVES)} moves)")
+    _contact_sheet(peaks, Path("out/videos/moves.png"))
+    print(f"saved {out} and out/videos/moves.png ({len(MOVES)} moves)")
 
 
 if __name__ == "__main__":

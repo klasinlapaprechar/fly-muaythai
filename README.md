@@ -25,7 +25,20 @@ Real male fruit flies do fight. They lunge, box with their forelegs, grab and ho
 
 The same opponent and the same starting positions at every point in training. Only the brain changes.
 
-<p align="center"><img src="docs/img/progression.png" width="900" alt="Six frames showing the fly from untrained to update 500"></p>
+<table>
+  <tr>
+    <td align="center"><img src="docs/media/progression/1.gif" width="420" alt="Untrained brain"><br><b>1. Untrained</b> (update 0)</td>
+    <td align="center"><img src="docs/media/progression/2.gif" width="420" alt="Update 100"><br><b>2. Learning to face the opponent</b> (update 100)</td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/media/progression/3.gif" width="420" alt="Orienting graduate"><br><b>3. Orienting graduate</b> (update 293)</td>
+    <td align="center"><img src="docs/media/progression/4.gif" width="420" alt="Heavy-bag graduate"><br><b>4. Heavy-bag graduate</b> (update 328)</td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/media/progression/5.gif" width="420" alt="Moving-target graduate"><br><b>5. Moving-target graduate</b> (update 333)</td>
+    <td align="center"><img src="docs/media/progression/6.gif" width="420" alt="Update 500"><br><b>6. Update 500</b> (sparring stage)</td>
+  </tr>
+</table>
 
 | # | Training point | Score (red : blue) | What changed |
 |---|---|---|---|
@@ -44,10 +57,30 @@ Each row is a single bout, and the policy is stochastic, so individual bouts var
 
 ## The move set
 
-<p align="center">
-  <img src="docs/media/jab_vs_kick.gif" width="720" alt="A left jab followed by a left kick, with the moving leg highlighted in yellow">
-  <br><em>Left jab (front leg), then left kick (middle leg). The moving leg is highlighted in yellow.</em>
-</p>
+Each move on its own, in slow motion. The legs doing the move are **yellow**. Left view: from behind the red fly (its left is your left). Right view: from above.
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/media/moves/jab_l.gif" width="420" alt="Left jab"><br><b>Left jab</b>: left front leg</td>
+    <td align="center"><img src="docs/media/moves/jab_r.gif" width="420" alt="Right jab"><br><b>Right jab</b>: right front leg</td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/media/moves/kick_l.gif" width="420" alt="Left kick"><br><b>Left kick</b>: left middle leg, roundhouse</td>
+    <td align="center"><img src="docs/media/moves/kick_r.gif" width="420" alt="Right kick"><br><b>Right kick</b>: right middle leg, roundhouse</td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/media/moves/lunge.gif" width="420" alt="Lunge"><br><b>Lunge (knee)</b>: rear up and slam forward</td>
+    <td align="center"><img src="docs/media/moves/guard.gif" width="420" alt="Guard"><br><b>Guard</b>: forelegs up in front of the face</td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/media/moves/box.gif" width="420" alt="Boxing stance"><br><b>Boxing stance</b>: rear up, forelegs up</td>
+    <td align="center"><img src="docs/media/moves/clinch.gif" width="420" alt="Clinch"><br><b>Clinch</b>: forelegs lock on and grip</td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/media/moves/walk.gif" width="420" alt="Walk"><br><b>Walk</b>: tripod gait</td>
+    <td align="center"><img src="docs/media/moves/turn.gif" width="420" alt="Turn"><br><b>Turn</b>: sides step in opposite directions</td>
+  </tr>
+</table>
 
 | Muay Thai | Fly version | Legs | Points |
 |---|---|---|---|
@@ -61,9 +94,7 @@ Each row is a single bout, and the policy is stochastic, so individual bouts var
 
 Strikes to the head score ×1.5. Strikes from the clinch score ×1.25, and knees from the clinch ×1.5. A strike only scores if the fly is facing its target within 45°.
 
-<p align="center"><img src="docs/img/moves.png" width="900" alt="All ten moves at their peak, from behind and from above"></p>
-
-▶ **[Watch every move in slow motion](docs/media/moves.mp4)**
+▶ **[Full-quality video of every move](docs/media/moves.mp4)**
 
 ---
 
