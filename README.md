@@ -223,7 +223,12 @@ pytest -q                                        # smoke tests
 - [x] Stages 0–2 (orient, heavy bag, mover)
 - [ ] Stage 3 (sparring), then the mixed stage with self-play
 - [ ] Final tournament against earlier versions and the veteran
-- [ ] Play against the trained fly yourself
+- [ ] **Play mode** (`python -m flymt.play`): fight the trained fly yourself
+  - You control the blue fly with the same commands the brain uses (walk, turn, jabs, kicks, lunge, guard, boxing stance, clinch), from the keyboard or a gamepad
+  - First-person view from the fly's head cameras, or an over-the-shoulder view
+  - "Fly time": runs slowed to ~0.2–0.3× by default (a fly's jab takes ~90 ms, faster than human reaction), with adjustable speed
+  - Live panel showing the trained fly's neurons firing as it fights you
+  - Difficulty levels from earlier checkpoints: easy (update 100), medium (update 500), hard (final)
 - [ ] Larger circuit (~20–30K neurons, including the male-specific *fruitless* aggression neurons)
 
 ## Credits
