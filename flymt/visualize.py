@@ -67,7 +67,7 @@ def record_bout(circuit: Circuit, ckpt: str | None, stage: int, seconds: float,
 
 
 def render_video(circuit, frames, rates, cmds, events, score, out: Path, stills: Path,
-                 fps: int = 30):
+                 fps: int = 30, title: str = ""):
     xy = display_positions(circuit)
     order = np.argsort(circuit.role != "inter", kind="stable")  # interneurons underneath
     base = np.array([matplotlib.colors.to_rgb(ROLE_COLORS[r]) for r in circuit.role])
@@ -84,6 +84,9 @@ def render_video(circuit, frames, rates, cmds, events, score, out: Path, stills:
     sc = ax_b.scatter(xy[order, 0], xy[order, 1], s=3, c="k", linewidths=0)
     ax_b.set_aspect("equal")
     ax_b.set_title(f"{circuit.n} real neurons from {circuit.dataset}", color="w", fontsize=9)
+    if title:
+        fig.text(0.24, 0.975, title, ha="center", va="top", color="#ffd54f",
+                 fontsize=15, weight="bold")
     banner = ax_f.text(0.5, 0.95, "", transform=ax_f.transAxes, ha="center", va="top",
                        fontsize=20, weight="bold", color="#ffd54f")
     clock = ax_f.text(0.01, 0.01, "", transform=ax_f.transAxes, color="w", fontsize=9)
@@ -154,6 +157,7 @@ def main():
     ap.add_argument("--sample", action="store_true", help="sample actions instead of greedy")
     ap.add_argument("--out", default="out/bout.mp4")
     ap.add_argument("--stills", default="docs/img")
+    ap.add_argument("--title", default="", help="caption drawn at the top of the video")
     args = ap.parse_args()
     circuit = Circuit.load(args.circuit)
     if args.stage < 0:  # fight whatever the checkpoint is training against
@@ -162,7 +166,8 @@ def main():
         circuit, args.ckpt, args.stage, args.seconds, args.seed, args.sample)
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    render_video(circuit, frames, rates, cmds, events, score, out, Path(args.stills))
+    render_video(circuit, frames, rates, cmds, events, score, out, Path(args.stills),
+                 title=args.title)
     throws = sum(e[0] == "throw" and e[1] == "red" for ev in events for e in ev)
     print(f"saved {out} ({len(frames)} ticks) | red threw {throws} strikes | "
           f"score red {score['red'].points:.1f} : blue {score['blue'].points:.1f}")

@@ -1,93 +1,202 @@
 # fly-muaythai
 
-A fruit fly brain, wired from the male *Drosophila* connectome, learns Muay Thai
-inside a MuJoCo physics simulation, and you can watch its neurons light up with
-every jab, kick and lunge.
+**A simulated brain wired from a real fruit fly's connectome, trained with reinforcement learning to fight Muay Thai–style.**
 
-Male flies already fight: they lunge, box with their forelegs, grab and hold
-(the clinch), and threaten with their wings. This project gives that behavior a
-ring, a referee, and a brain that learns to win.
+6,170 real neurons from the male *Drosophila* central nervous system drive a physically simulated fly body in a two-fly ring. The wiring comes from the connectome and never changes. Recurrent PPO learns everything else from the points it scores, and you can watch every neuron light up as it jabs, kicks, clinches and lunges.
 
-## How it fits together
+<p align="center">
+  <img src="docs/media/fight_update500.gif" width="720" alt="The trained fly (red) fighting the sparring partner (blue), with its brain activity on the right">
+  <br><em>Update 500: red lands kicks while its real neurons (right) light up. Shown at 0.3× speed.</em>
+</p>
 
-```
- sensory neurons         connectome-wired brain            descending neurons       "nerve cord"
- (vision, touch,   --->  (weights & signs fixed by  --->   (command vector)   --->  motor system
-  balance)                the male CNS connectome;                                 (gait + strikes)
-                          RL tunes per-cell-type gains)                                   |
-        ^                                                                                 v
-        +------------------------- MuJoCo two-fly ring + referee <------------------------+
-```
-
-| Module | What it does |
+| | |
 |---|---|
-| `flymt/arena.py` | Ring with ropes, two flybody fruit flies (red and blue corners). |
-| `flymt/ik.py` | Per-leg inverse kinematics in the thorax frame. |
-| `flymt/motor.py` | The "nerve cord": tripod walking gait plus Muay Thai strikes (jab, roundhouse kick, lunge, clinch, guard) built from IK keyframes. |
-| `flymt/fight_env.py` | Bout logic: physics stepping, a referee that scores strikes by contact force, knockdowns, egocentric observations, rewards. |
-| `flymt/connectome.py` | Pulls the fighting circuit from the male CNS connectome (neuPrint). |
-| `flymt/brain.py` | PyTorch rate model of that circuit; it is the PPO policy. |
-| `flymt/opponents.py` | Curriculum sparring partners: heavy bag, mover, sparring fighter. |
-| `flymt/ppo.py` | Recurrent PPO: parallel physics workers on CPU, backprop through the brain on the Apple GPU. |
-| `flymt/visualize.py` | Video of a bout next to the brain, every neuron glowing with its activity. |
+| **Brain** | 6,170 neurons and 370K synaptic connections from `male-cns:v1.0` (Janelia FlyEM, via neuPrint) |
+| **Learned** | 14,910 parameters: per-cell-type gains and biases, sensory gains, and a descending-neuron readout. The wiring stays fixed. |
+| **Body and physics** | [flybody](https://github.com/TuragaLab/flybody) fruit fly model in [MuJoCo](https://mujoco.org); each fly weighs ~1 mg, like the real animal |
+| **Learning** | Recurrent actor-critic PPO with GAE, backpropagation through time on an Apple GPU, curriculum learning, and self-play |
+| **Hardware** | One 8 GB Apple Silicon MacBook: ~130 simulation steps/s, ~25 s per training update |
 
-![Fighting circuit](docs/img/circuit.png)
+Real male fruit flies do fight. They lunge, box with their forelegs, grab and hold each other, and rear up in a boxing stance. This project gives that instinct a ring, a referee and a learning rule.
 
-### What is real and what is modeled
+---
+
+## Progression
+
+The same opponent and the same starting positions at every point in training. Only the brain changes.
+
+<p align="center"><img src="docs/img/progression.png" width="900" alt="Six frames showing the fly from untrained to update 500"></p>
+
+| # | Training point | Score (red : blue) | What changed |
+|---|---|---|---|
+| 1 | Untrained (update 0) | 0 : 1.5 | Random flailing; no tracking of the opponent |
+| 2 | Update 100 | 5.2 : 3.8 | Starts turning toward the opponent; first landed strikes |
+| 3 | Orienting graduate (update 293) | 19.3 : 12.5 | Keeps the opponent dead ahead and trades heavily |
+| 4 | Heavy-bag graduate (update 328) | 15.8 : 11.0 | Throws 91% of strikes while facing the target |
+| 5 | Moving-target graduate (update 333) | 8.2 : 3.8 | Takes far fewer hits |
+| 6 | Update 500 (sparring stage) | **36.8 : 9.0** | Nose-to-nose pressure, guard up while striking, clinching |
+
+Each row is a single bout, and the policy is stochastic, so individual bouts vary. Over an 8-bout evaluation at update 500, the fly averaged **34.8 points landed to 7.8 taken**, with **59% of strikes landing** and **92% thrown while facing the opponent**.
+
+▶ **[Watch the full progression (79 s)](docs/media/progression.mp4)**
+
+---
+
+## The move set
+
+<p align="center">
+  <img src="docs/media/jab_vs_kick.gif" width="720" alt="A left jab followed by a left kick, with the moving leg highlighted in yellow">
+  <br><em>Left jab (front leg), then left kick (middle leg). The moving leg is highlighted in yellow.</em>
+</p>
+
+| Muay Thai | Fly version | Legs | Points |
+|---|---|---|---|
+| Jab | Front leg punches straight ahead (~90 ms) | Front (T1) | 1 |
+| Roundhouse kick | Middle leg chambers out to the side, then sweeps forward and across the front (~150 ms) | Middle (T2) | 1.5 |
+| Knee | Lunge: rears up on the hind legs and slams forward | Front + hind | 2 |
+| Guard | Both forelegs raised in front of the face | Front | – |
+| Boxing stance | Rears up ~38° on middle and hind legs, forelegs up, the stance real male flies fight in | All | – |
+| Clinch | Forelegs lock on; a grip of about body weight holds the opponent head to head | Front | – |
+| Knockdown | Opponent on its side or back for 0.15 s | – | 5 |
+
+Strikes to the head score ×1.5. Strikes from the clinch score ×1.25, and knees from the clinch ×1.5. A strike only scores if the fly is facing its target within 45°.
+
+<p align="center"><img src="docs/img/moves.png" width="900" alt="All ten moves at their peak, from behind and from above"></p>
+
+▶ **[Watch every move in slow motion](docs/media/moves.mp4)**
+
+---
+
+## How it works
+
+```mermaid
+flowchart LR
+    S["Senses<br/>opponent position, looming,<br/>touch, balance, reward"] --> SN["Real sensory neurons<br/>LC10, LPLC2/LC4, bristles,<br/>JO, pC1, PAM"]
+    SN --> B["Connectome circuit<br/>6,170 neurons · 370K synapses<br/>(wiring fixed)"]
+    B --> DN["1,314 real descending<br/>neurons"]
+    DN --> A["Action<br/>walk · turn · strike · posture"]
+    A --> M["Motor system<br/>tripod gait + strike<br/>keyframes (IK)"]
+    M --> P["MuJoCo physics<br/>two-fly ring"]
+    P --> R["Referee<br/>contact-force scoring"]
+    R -- reward --> PPO["Recurrent PPO<br/>(learns 14,910 params)"]
+    PPO -. updates .-> B
+    P --> S
+```
+
+Every 10 ms, the fly's senses drive real sensory neurons. Activity spreads through the connectome-wired circuit as a firing-rate model (τ = 20 ms). The fly's 1,314 real descending neurons, its command lines from brain to body, are read out as an action:
+- a walk and turn command;
+- one strike choice: none, jab left/right, kick left/right, or lunge;
+- one posture choice: none, guard, boxing stance, or clinch.
+
+A scripted motor system stands in for the nerve cord. It turns those commands into leg movements using a tripod gait and inverse-kinematics strike keyframes.
+
+### The brain
+
+<p align="center"><img src="docs/img/circuit.png" width="560" alt="The 6,170-neuron fighting circuit, drawn at each neuron's cell-body position"></p>
+
+The circuit is built by `flymt/connectome.py` from the male CNS connectome:
+
+| Role | Neurons | Real cell types |
+|---|---|---|
+| Opponent tracking (each eye) | 250 + 250 | LC10, the visual neurons male flies use to chase rivals |
+| Looming (incoming strikes) | 250 | LPLC2, LC4 |
+| Touch: head, body, legs | 250 each | Head bristles (BM), body and leg tactile neurons |
+| Balance | 250 | Johnston's organ (JO-C/E) |
+| Aggression drive | 156 | pC1, the male-specific P1-class cluster |
+| Reward (visual only) | 250 | PAM dopamine neurons; they flash when the fly scores |
+| Commands to the body | 1,314 | All descending neurons |
+| Interneurons | 2,700 | Selected by synapse count along real paths from sensors to descending neurons |
+
+**What is real and what is modeled:**
 
 | | Source |
 |---|---|
-| Neurons, cell types, who connects to whom, synapse counts | Real: `male-cns:v1.0` (6,170 neurons, 370k connections, 6.5M synapses) |
-| Excitatory vs inhibitory | Real: predicted neurotransmitter (ACh +; GABA, Glu, His −; monoamines modulatory) |
-| Synaptic strength scale per cell type, excitability | **Learned** by PPO (12k parameters); the wiring never changes |
-| Neuron dynamics | Simplified firing-rate model (τ = 20 ms) |
-| Eyes, bristles, antennae | Abstracted into drives for the real sensory neurons (LC10, LPLC2/LC4, BM, JO) |
-| Leg control below the descending neurons | Scripted motor system standing in for the nerve cord |
+| Neurons, cell types, connections, synapse counts | **Real:** `male-cns:v1.0` |
+| Excitatory vs inhibitory | **Real:** predicted neurotransmitter (ACh +; GABA, glutamate, histamine −; monoamines treated as modulatory) |
+| Cell-type excitability, sensory gains, command readout | **Learned** by PPO (14,910 parameters) |
+| Neuron dynamics | Simplified firing-rate model |
+| Eyes, bristles, antennae | Abstracted into drives for the real sensory neurons |
+| Leg control below the descending neurons | Scripted motor system |
 
-Learning is standard RL: the brain samples actions, the referee's points are the
-reward, and PPO updates the brain from that reward alone. PAM dopamine neurons
-receive the reward signal so you can watch them flash on every scoring strike;
-they do not drive learning.
+It is a model constrained by real wiring, not a full simulation of a fly brain.
 
-## Train and watch
+### Training
 
-```bash
-python -m flymt.connectome      # once; needs NEUPRINT_APPLICATION_CREDENTIALS in .env
-python -m flymt.ppo             # train (resume with --resume)
-python -m flymt.visualize --ckpt checkpoints/latest.pt --stage 2
-```
+Standard RL, with no scripted decisions in the brain. Twelve bouts run in parallel on CPU worker processes. Recurrent PPO backpropagates through 32-tick windows of brain activity on the Apple GPU (MPS).
 
-### Fly Muay Thai
+**Curriculum:**
 
-| Muay Thai | Fly version | Points |
+| Stage | Opponent | Graduates when | Graduated at |
+|---|---|---|---|
+| 0. Orient | Wanders, never strikes; the fly starts facing a random direction | Mean facing ≥ 0.8, and it passes a steering test (turns the correct way at ±15°, ±45°, ±90°, and holds steady dead ahead) | Update 293 |
+| 1. Heavy bag | Stands still | Net +3 points per bout | Update 328 |
+| 2. Mover | Wanders | Net +3 points per bout | Update 333 |
+| 3. Sparring | Circles, steps in to strike, retreats, guards | Net +8 points per bout with accurate striking | In progress |
+| 4. Mixed | Half the bouts: a scripted "veteran" that counter-punches, throws combinations and clinches. Half: past versions of its own brain (self-play). | – | – |
+
+**Reward design, in short:**
+- **Scoring:** points for clean strikes, knockdowns and combinations.
+- **Costs:** every strike thrown, every miss, any strike thrown out of range or while not facing the opponent, and missed lunges (extra).
+- **Defense:** credit for slipping and blocking the opponent's strikes.
+- **Clinch:** credit for entering and controlling a clinch.
+- **Resets:** credit for backing out of a bad position and squaring up again.
+- **Penalties:** running away without fighting back, standing around without striking, and being sideways to the opponent.
+
+### Lessons learned
+
+Most of the work was making the reward mean what we meant. Each of these showed up in training and was fixed:
+
+| Problem | Cause | Fix |
 |---|---|---|
-| Jab / cross | Foreleg (T1) punch | 1 |
-| Roundhouse kick | Mid-leg (T2) sweep | 1.5 |
-| Knee / elbow | Lunge: rear up and slam down | 2 |
-| Clinch | Forelegs grab with claw adhesion | – |
-| Knockdown | Opponent on its side/back for 0.15 s | 5 |
+| Fought side-on and turned away | Hits scored from any angle, and the old kick could only connect from the side | Strikes only count when facing within 45°; the kick was redesigned so it can reach a squared-up opponent |
+| Stood still in the boxing stance and never struck (policy collapse) | Small per-tick rewards for being in range and facing outweighed the passivity penalty | Positional rewards only count while actively striking; passivity is penalized at any distance |
+| Spammed strikes | Each strike was an independent coin flip every 10 ms | Strikes became one choice per tick with "none" as the default; penalties for misses and out-of-range strikes |
+| Always circled one way | At full recurrence the circuit saturated and a right-side steering neuron was pinned on | Start at half recurrence; calibrate the turn output; add an orienting stage |
+| Overshooting "bang-bang" steering | Reward based on cos(angle) is flat near dead ahead | Precision bonus for keeping the opponent within ~15° |
+| Clinch did nothing | The clinch pose raised the forelegs but held nothing | A physical grip (capped spring ≈ body weight) plus clinch rewards |
+| PPO update was biased | Walk/turn actions were clipped before being stored | Store the raw sample; the motor system bounds it |
 
-## Setup
+---
 
-Requires Python 3.11–3.12 (tested on macOS arm64).
+## Try it
+
+Requires Python 3.11–3.12 (tested on macOS arm64) and a free [neuPrint](https://neuprint.janelia.org) token saved in `.env` as `NEUPRINT_APPLICATION_CREDENTIALS=...`.
 
 ```bash
 uv venv --python 3.12 .venv && source .venv/bin/activate
-uv pip install -e .
+uv pip install -e ".[dev]"
+
+python -m flymt.connectome                       # build the circuit from the connectome (once)
+python -m flymt.ppo                              # train from scratch
+python -m flymt.ppo --resume                     # continue from checkpoints/latest.pt
+python -m flymt.visualize --ckpt checkpoints/latest.pt --stage -1 --sample   # watch a bout
+python -m flymt.moves_demo                       # render every move in slow motion
+pytest -q                                        # smoke tests
 ```
+
+| Module | Role |
+|---|---|
+| `flymt/connectome.py` | Builds the fighting circuit from neuPrint |
+| `flymt/brain.py` | PyTorch model of the circuit; it is the PPO policy |
+| `flymt/ppo.py` | Recurrent PPO, parallel fight workers, curriculum, steering test |
+| `flymt/fight_env.py` | Bout physics, referee, observations, rewards, clinch grip |
+| `flymt/opponents.py` | Scripted opponents: mover, sparring partner, veteran |
+| `flymt/motor.py` | Tripod gait, strikes and postures from IK keyframes |
+| `flymt/arena.py`, `flymt/ik.py` | Two-fly ring and per-leg inverse kinematics |
+| `flymt/visualize.py`, `flymt/moves_demo.py` | Bout videos with live brain activity, and the move library |
 
 ## Status
 
-- [x] Two-fly ring, fly bodies, faster-than-real-time physics
-- [x] Motor system: walking, turning, jab, kick, lunge, clinch, guard
-- [x] Referee: contact-force strike scoring, knockdowns
-- [x] Real fighting circuit from male-cns:v1.0: 6,170 neurons, 370k connections ([image](docs/img/circuit.png))
-- [x] Recurrent PPO: CPU physics workers + backprop through the brain on Apple GPU (MPS)
-- [ ] Training run: bag -> mover -> sparring -> self-play
-- [x] Neural activity visualization synced to strikes
+- [x] Connectome circuit, physics, motor system, referee
+- [x] Recurrent PPO on Apple GPU with curriculum and self-play
+- [x] Stages 0–2 (orient, heavy bag, mover)
+- [ ] Stage 3 (sparring), then the mixed stage with self-play
+- [ ] Final tournament against earlier versions and the veteran
+- [ ] Play against the trained fly yourself
+- [ ] Larger circuit (~20–30K neurons, including the male-specific *fruitless* aggression neurons)
 
 ## Credits
 
+- Connectome: Janelia FlyEM male CNS dataset (`male-cns:v1.0`), via [neuPrint](https://neuprint.janelia.org)
 - Fly body: [flybody](https://github.com/TuragaLab/flybody) (Vaxenburg et al.)
 - Physics: [MuJoCo](https://mujoco.org)
-- Connectome: Janelia FlyEM male CNS dataset via [neuPrint](https://neuprint.janelia.org)
