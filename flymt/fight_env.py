@@ -22,7 +22,9 @@ KNOCKDOWN_UP = 0.3  # thorax "up" z below this = on its side or back
 KNOCKDOWN_SECONDS = 0.15
 KNOCKDOWN_POINTS = 5.0
 STRIKE_COST = 0.1  # per strike thrown (fatigue)
-MISS_PENALTY = 0.1  # extra when a strike ends without landing
+MISS_PENALTY = 0.25  # extra when a strike ends without landing
+OUT_OF_RANGE_PENALTY = 0.4  # throwing when the opponent is beyond striking reach
+STRIKE_REACH_CM = 0.25  # thorax-to-thorax; hits land within ~0.2 cm
 LUNGE_MISS_PENALTY = 0.7  # extra on top for a missed lunge: an overcommitted miss
 HEAD_MULTIPLIER = 1.5  # strikes that land on the head score more
 COMBO_WINDOW = 0.5  # s: a different strike landing this soon after a hit...
@@ -180,6 +182,8 @@ class FightEnv:
                     rewards[n] -= STRIKE_COST
                     if self._facing(n) < CLEAN_FACING:
                         rewards[n] -= UNFACED_STRIKE_PENALTY  # not picking its shot
+                    if self._distance() > STRIKE_REACH_CM:
+                        rewards[n] -= OUT_OF_RANGE_PENALTY  # swinging at air
                     events.append(("throw", n, s))
             for attacker, victim, force, part in self._scan_hits():
                 strike = self.motor[attacker].active
