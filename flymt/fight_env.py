@@ -21,11 +21,22 @@ TOUCH_SCALE = 0.05  # force that saturates the touch sensors
 KNOCKDOWN_UP = 0.3  # thorax "up" z below this = on its side or back
 KNOCKDOWN_SECONDS = 0.15
 KNOCKDOWN_POINTS = 5.0
-STRIKE_COST = 0.2  # per strike thrown: fatigue, so accuracy beats spamming
-APPROACH_REWARD = 5.0  # per cm closed
+STRIKE_COST = 0.35  # per strike thrown: fatigue, so accuracy beats spamming
+# Fight-craft shaping. Per tick = per 10 ms; hits (1-2) and knockdowns (5) dominate.
+APPROACH_REWARD = 5.0  # per cm this fighter itself moves toward the opponent
 FACING_REWARD = 0.01  # per tick, scaled by cos(bearing)
 IN_RANGE_REWARD = 0.02  # per tick within striking range and facing
 RANGE_CM = 0.25
+BACK_TURNED_PENALTY = 0.02  # per tick facing away while within ENGAGED_CM
+ENGAGED_CM = 0.5
+CIRCLE_REWARD = 0.01  # per tick of sideways movement around the opponent, in range and facing
+CIRCLE_SPEED = 0.3  # cm/s of sideways speed that earns the full circling reward
+DEFEND_REWARD = 0.5  # opponent's strike misses while within striking range (slipped)
+BLOCK_BONUS = 0.3  # ...and it was thrown into a guard or boxing stance (blocked)
+RETREAT_GRACE = 0.5  # s of continuous backing off allowed (footwork after a strike)
+RETREAT_PENALTY = 0.03  # per tick of retreating beyond the grace period
+PASSIVE_SECONDS = 1.0  # within ENGAGED_CM, going this long without a strike...
+PASSIVE_PENALTY = 0.03  # ...costs this per tick
 
 OBS_FIELDS = (
     # Vision: where the opponent is (egocentric).
@@ -101,6 +112,8 @@ class FightEnv:
         self._down_time = {n: 0.0 for n in arena.FIGHTERS}
         self._landed = {n: False for n in arena.FIGHTERS}  # one hit per strike
         self._scored = {n: 0.0 for n in arena.FIGHTERS}
+        self._retreat_time = {n: 0.0 for n in arena.FIGHTERS}
+        self._since_strike = {n: 0.0 for n in arena.FIGHTERS}
         return self.observe()
 
     def step(self, cmds: dict[str, np.ndarray]):
@@ -109,12 +122,25 @@ class FightEnv:
         rewards = {n: 0.0 for n in arena.FIGHTERS}
         self._scored = {n: 0.0 for n in arena.FIGHTERS}
         self._touch = {n: np.zeros(4) for n in arena.FIGHTERS}
-        dist_before = self._distance()
+        pos_before = {n: self._frame(n)[0][:2].copy() for n in arena.FIGHTERS}
         for _ in range(int(round(BRAIN_DT / MOTOR_DT))):
+            before = {n: self.motor[n].active for n in arena.FIGHTERS}
             started = self._motor_tick(cmds)
+            for k, n in enumerate(arena.FIGHTERS):
+                # A strike that ended without landing was slipped or blocked.
+                prev, cur = before[n], self.motor[n].active
+                ended = prev is not None and (cur is None or cur[1] < prev[1])
+                if ended and not self._landed[n] and self._distance() < RANGE_CM * 1.4:
+                    defender = arena.FIGHTERS[1 - k]
+                    rewards[defender] += DEFEND_REWARD
+                    blocked = self.motor[defender].hold in ("guard", "box")
+                    if blocked:
+                        rewards[defender] += BLOCK_BONUS
+                    events.append(("block" if blocked else "slip", defender, prev[0]))
             for n, s in started.items():
                 if s:
                     self._landed[n] = False
+                    self._since_strike[n] = 0.0
                     rewards[n] -= STRIKE_COST
                     events.append(("throw", n, s))
             for attacker, victim, force in self._scan_hits():
@@ -144,15 +170,34 @@ class FightEnv:
                 self._scored[other] += KNOCKDOWN_POINTS
                 events.append(("knockdown", other, n))
                 done = True
-        # Shaping so there is something to learn before the first hit lands:
-        # close the distance, face the opponent, and hold fighting range.
+        # Fight-craft shaping, scored on each fighter's own movement.
         dist = self._distance()
-        closing = dist_before - dist
-        for n in arena.FIGHTERS:
+        for k, n in enumerate(arena.FIGHTERS):
+            other = arena.FIGHTERS[1 - k]
+            p = self._frame(n)[0][:2]
+            to_opp = self._frame(other)[0][:2] - p
+            u = to_opp / (np.linalg.norm(to_opp) + 1e-6)
+            moved = p - pos_before[n]
+            toward = float(moved @ u)  # cm this fighter moved toward the opponent
+            sideways = abs(float(moved @ np.array([-u[1], u[0]]))) / BRAIN_DT  # cm/s
             facing = self._facing(n)
-            rewards[n] += APPROACH_REWARD * closing + FACING_REWARD * facing
+            r = APPROACH_REWARD * toward + FACING_REWARD * facing
             if dist < RANGE_CM and facing > 0.8:
-                rewards[n] += IN_RANGE_REWARD
+                r += IN_RANGE_REWARD
+            if dist < ENGAGED_CM and facing < 0:
+                r -= BACK_TURNED_PENALTY  # stay face to face
+            if dist < ENGAGED_CM * 0.8 and facing > 0.7:
+                r += CIRCLE_REWARD * min(sideways / CIRCLE_SPEED, 1.0)
+            # Running: backing off for too long.
+            self._retreat_time[n] = (self._retreat_time[n] + BRAIN_DT
+                                     if toward < -0.05 * BRAIN_DT else 0.0)
+            if self._retreat_time[n] > RETREAT_GRACE:
+                r -= RETREAT_PENALTY
+            # Not fighting back: in range but no strikes for too long.
+            self._since_strike[n] += BRAIN_DT
+            if dist < ENGAGED_CM and self._since_strike[n] > PASSIVE_SECONDS:
+                r -= PASSIVE_PENALTY
+            rewards[n] += r
         return self.observe(), rewards, done, events
 
     def _motor_tick(self, cmds) -> dict[str, str | None]:
