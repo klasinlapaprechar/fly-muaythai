@@ -59,8 +59,20 @@ RESET_BONUS = 0.4  # for completing a reset
 RESET_MAX_SECONDS = 1.5  # a reset that takes longer than this is abandoned
 # Clinch: control the opponent chest to chest and strike from there (knees).
 CLINCH_DIST = 0.18  # cm
-CLINCH_CONTROL_REWARD = 0.02  # per tick clinched, close and facing
-CLINCH_STRIKE_MULTIPLIER = 1.5  # strikes landed from the clinch score more
+# The grip: while clinching, close and facing, a capped spring pulls the two
+# thoraxes together (forelegs locked behind the neck). A fly weighs ~1 mg
+# (~0.97 g*cm/s^2), so the cap is ~body weight: holds an opponent that
+# backs away, but a determined one can still break free.
+CLINCH_GRIP_DIST = 0.27  # cm: the grip breaks beyond this (heads touch at ~0.2)
+CLINCH_GRIP_REST = 0.19  # cm: the spring pulls toward head-to-head contact
+CLINCH_GRIP_K = 25.0  # g/s^2 per cm of stretch
+CLINCH_GRIP_MAX = 1.0  # g*cm/s^2, about body weight
+CLINCH_ENTRY_BONUS = 0.4  # for locking in a clinch grip (not again within 1 s)
+CLINCH_CONTROL_REWARD = 0.04  # per tick gripping; after 1 s only while striking
+CLINCH_FREE_SECONDS = 1.0  # a clinch counts as fighting on its own for this long
+CLINCHED_PENALTY = 0.02  # per tick being held in a clinch without clinching back
+CLINCH_STRIKE_MULTIPLIER = 1.25  # strikes landed from the clinch score more...
+CLINCH_KNEE_MULTIPLIER = 1.5  # ...and a lunge from the clinch (a knee) most
 RETREAT_GRACE = 1.0  # s of backing off *without throwing a strike* before it counts as running
 RETREAT_PENALTY = 0.02  # per tick of running (retreating without fighting back)
 PASSIVE_SECONDS = 1.0  # going this long without a strike, and not closing in...
@@ -147,6 +159,9 @@ class FightEnv:
         self._since_strike = {n: 0.0 for n in arena.FIGHTERS}
         self._last_hit = {n: (-1.0, None) for n in arena.FIGHTERS}  # (time, strike)
         self._resetting = {n: 0.0 for n in arena.FIGHTERS}  # seconds into a reset, 0 = none
+        self._grip = {n: 0.0 for n in arena.FIGHTERS}  # seconds holding a clinch grip
+        self._since_grip = {n: 9.0 for n in arena.FIGHTERS}
+        self._entry_pending = {n: False for n in arena.FIGHTERS}  # fresh grip, bonus unpaid
         return self.observe()
 
     def step(self, cmds: dict[str, np.ndarray]):
@@ -192,8 +207,8 @@ class FightEnv:
                 if self._facing(attacker) < CLEAN_FACING:
                     continue  # side-on or backward contact is not a clean strike
                 pts = HIT_POINTS[strike[0]] * (HEAD_MULTIPLIER if part == 0 else 1.0)
-                if self.motor[attacker].hold == "clinch":
-                    pts *= CLINCH_STRIKE_MULTIPLIER
+                if self._grip.get(attacker, 0.0) > 0:
+                    pts *= CLINCH_KNEE_MULTIPLIER if strike[0] == "lunge" else CLINCH_STRIKE_MULTIPLIER
                     events.append(("clinch_strike", attacker, strike[0]))
                 self._landed[attacker] = True
                 t_last, s_last = self._last_hit[attacker]
@@ -269,9 +284,17 @@ class FightEnv:
                     events.append(("reset", n))
                 elif self._resetting[n] > RESET_MAX_SECONDS:
                     self._resetting[n] = 0.0
-            if (self.motor[n].hold == "clinch" and dist < CLINCH_DIST and facing > CLEAN_FACING
-                    and active):
-                r += CLINCH_CONTROL_REWARD
+            # Clinch: reward locking in and controlling; the first second counts
+            # as fighting on its own, after that it must strike from the clinch.
+            if self._grip[n] > 0:
+                if self._entry_pending[n]:
+                    self._entry_pending[n] = False
+                    r += CLINCH_ENTRY_BONUS
+                    events.append(("clinch", n))
+                if self._grip[n] <= CLINCH_FREE_SECONDS or active:
+                    r += CLINCH_CONTROL_REWARD
+            if self._grip[other] > 0 and self._grip[n] == 0:
+                r -= CLINCHED_PENALTY  # being controlled without clinching back
             # Running: backing off without fighting back. Retreating while still
             # throwing strikes is fine (fighting off the back foot), so any strike
             # resets the clock, as does stopping or coming forward. A reset is not running.
@@ -286,14 +309,41 @@ class FightEnv:
             # At any distance: standing off (not closing in) without striking is
             # passive. Walking in to engage and resetting are not.
             if (self._since_strike[n] > PASSIVE_SECONDS and toward <= 0.05 * BRAIN_DT
-                    and not self._resetting[n]):
+                    and not self._resetting[n]
+                    and not 0 < self._grip[n] <= CLINCH_FREE_SECONDS):
                 r -= PASSIVE_PENALTY
             rewards[n] += r
         return self.observe(), rewards, done, events
 
+    def _apply_grips(self):
+        """Clinch grip: a capped spring between the thoraxes while clinching."""
+        xf = self.data.xfrc_applied
+        for n in arena.FIGHTERS:
+            xf[self.idx[n].thorax_body, :] = 0.0
+        for k, n in enumerate(arena.FIGHTERS):
+            other = arena.FIGHTERS[1 - k]
+            p, q = self._frame(n)[0], self._frame(other)[0]
+            d = float(np.linalg.norm((q - p)[:2]))
+            gripping = (self.motor[n].hold == "clinch" and d < CLINCH_GRIP_DIST
+                        and self._facing(n) > 0.5)
+            if gripping:
+                if self._grip[n] == 0 and self._since_grip[n] > 1.0:
+                    self._entry_pending[n] = True  # a fresh clinch, not a re-grab
+                u = (q - p)[:2] / (d + 1e-9)
+                f = min(CLINCH_GRIP_K * max(d - CLINCH_GRIP_REST, 0.0), CLINCH_GRIP_MAX)
+                xf[self.idx[other].thorax_body, :2] -= f * u
+                xf[self.idx[n].thorax_body, :2] += f * u
+                self._grip[n] += MOTOR_DT
+                self._since_grip[n] = 0.0
+            else:
+                self._grip[n] = 0.0
+                self._since_grip[n] += MOTOR_DT
+
     def _motor_tick(self, cmds) -> dict[str, str | None]:
         started = {n: self.motor[n].step(cmds[n], MOTOR_DT, self.data.ctrl)
                    for n in arena.FIGHTERS}
+        if hasattr(self, "_grip"):
+            self._apply_grips()
         for _ in range(int(round(MOTOR_DT / PHYSICS_DT))):
             mujoco.mj_step(self.model, self.data)
         return started
