@@ -21,8 +21,8 @@ TOUCH_SCALE = 0.05  # force that saturates the touch sensors
 KNOCKDOWN_UP = 0.3  # thorax "up" z below this = on its side or back
 KNOCKDOWN_SECONDS = 0.15
 KNOCKDOWN_POINTS = 5.0
-STRIKE_COST = 0.2  # per strike thrown (fatigue)
-MISS_PENALTY = 0.3  # extra when a strike ends without landing
+STRIKE_COST = 0.1  # per strike thrown (fatigue)
+MISS_PENALTY = 0.1  # extra when a strike ends without landing
 LUNGE_MISS_PENALTY = 0.7  # extra on top for a missed lunge: an overcommitted miss
 HEAD_MULTIPLIER = 1.5  # strikes that land on the head score more
 COMBO_WINDOW = 0.5  # s: a different strike landing this soon after a hit...
@@ -53,8 +53,8 @@ CLINCH_CONTROL_REWARD = 0.02  # per tick clinched, close and facing
 CLINCH_STRIKE_MULTIPLIER = 1.5  # strikes landed from the clinch score more
 RETREAT_GRACE = 1.0  # s of backing off *without throwing a strike* before it counts as running
 RETREAT_PENALTY = 0.02  # per tick of running (retreating without fighting back)
-PASSIVE_SECONDS = 1.0  # within ENGAGED_CM, going this long without a strike...
-PASSIVE_PENALTY = 0.03  # ...costs this per tick
+PASSIVE_SECONDS = 1.0  # going this long without a strike, and not closing in...
+PASSIVE_PENALTY = 0.05  # ...costs this per tick (must outweigh all positional rewards)
 
 OBS_FIELDS = (
     # Vision: where the opponent is (egocentric).
@@ -217,12 +217,15 @@ class FightEnv:
             toward = float(moved @ u)  # cm this fighter moved toward the opponent
             sideways = abs(float(moved @ np.array([-u[1], u[0]]))) / BRAIN_DT  # cm/s
             facing = self._facing(n)
+            # Positional rewards only count while actively fighting (a strike in
+            # the last second); otherwise standing in range doing nothing pays.
+            active = self._since_strike[n] <= PASSIVE_SECONDS
             r = APPROACH_REWARD * toward + FACING_REWARD * facing
-            if dist < RANGE_CM and facing > 0.8:
+            if dist < RANGE_CM and facing > 0.8 and active:
                 r += IN_RANGE_REWARD
             if dist < ENGAGED_CM:
                 r -= SIDEWAYS_PENALTY * (1 - facing) / 2  # stay face to face
-            if dist < ENGAGED_CM * 0.8 and facing > 0.7:
+            if dist < ENGAGED_CM * 0.8 and facing > 0.7 and active:
                 r += CIRCLE_REWARD * min(sideways / CIRCLE_SPEED, 1.0)
                 if self.motor[n].hold == "box":
                     r += BOX_STANCE_REWARD
@@ -239,7 +242,8 @@ class FightEnv:
                     events.append(("reset", n))
                 elif self._resetting[n] > RESET_MAX_SECONDS:
                     self._resetting[n] = 0.0
-            if (self.motor[n].hold == "clinch" and dist < CLINCH_DIST and facing > CLEAN_FACING):
+            if (self.motor[n].hold == "clinch" and dist < CLINCH_DIST and facing > CLEAN_FACING
+                    and active):
                 r += CLINCH_CONTROL_REWARD
             # Running: backing off without fighting back. Retreating while still
             # throwing strikes is fine (fighting off the back foot), so any strike
@@ -252,7 +256,9 @@ class FightEnv:
                 r -= RETREAT_PENALTY
             # Not fighting back: in range but no strikes for too long.
             self._since_strike[n] += BRAIN_DT
-            if (dist < ENGAGED_CM and self._since_strike[n] > PASSIVE_SECONDS
+            # At any distance: standing off (not closing in) without striking is
+            # passive. Walking in to engage and resetting are not.
+            if (self._since_strike[n] > PASSIVE_SECONDS and toward <= 0.05 * BRAIN_DT
                     and not self._resetting[n]):
                 r -= PASSIVE_PENALTY
             rewards[n] += r
