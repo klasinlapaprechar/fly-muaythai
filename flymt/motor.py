@@ -60,12 +60,16 @@ MOVES = {
         (0.55, ((0.23, 0.03, -0.02),)),  # extend straight at the head
         (1.0, ((0.09, 0.087, GROUND_Z),)),
     ), duration=0.09),
+    # Roundhouse: chamber out to the side, then sweep forward and across so the
+    # leg finishes in front of the opponent's head (which sits ~0.14 cm ahead
+    # when heads touch), not beside it.
     "kick": Move(("T2",), (
         (0.0, ((0.025, 0.164, GROUND_Z),)),
-        (0.3, ((0.03, 0.2, -0.05),)),  # raise the knee out to the side
-        (0.6, ((0.14, 0.12, -0.05),)),  # sweep forward and in
+        (0.3, ((0.05, 0.2, -0.04),)),  # chamber: knee out to the side
+        (0.55, ((0.15, 0.13, -0.03),)),  # swing forward
+        (0.75, ((0.19, 0.04, -0.03),)),  # finish across the front, at head height
         (1.0, ((0.025, 0.164, GROUND_Z),)),
-    ), duration=0.13),
+    ), duration=0.15),
     # Rear up on the hind legs with forelegs high, then drop forward onto the
     # opponent. Real male flies lunge exactly like this.
     "lunge": Move(("T1", "T3"), (
