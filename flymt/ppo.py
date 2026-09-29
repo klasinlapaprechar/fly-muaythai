@@ -22,14 +22,15 @@ from torch import nn
 
 from flymt import opponents
 from flymt.brain import ACTION_DIM, Circuit, TorchBrain, to_command
-from flymt.fight_env import OBS_FIELDS, FightEnv
+from flymt.fight_env import OBS_FIELDS, STRIKE_REACH_CM, FightEnv
 
 ORIENT, BAG, MOVER, SPARRING, MIXED = range(len(opponents.STAGES))
 EPISODE_SECONDS = {ORIENT: 3.0, BAG: 3.0, MOVER: 3.0, SPARRING: 4.0, MIXED: 6.0}
 # Promote when the mean net score (points landed - taken) per bout reaches this.
 PROMOTE_AT = {BAG: 3.0, MOVER: 3.0, SPARRING: 8.0}
-# ...and, where listed, throw at most this many strikes per bout (accuracy, not spam).
-MAX_THROWS_TO_PROMOTE = {SPARRING: 15.0}
+# ...and, where listed, strike accurately: judge how well it strikes, not how often.
+MIN_ACCURACY_TO_PROMOTE = {SPARRING: 0.55}  # share of strikes that land
+MAX_OUT_OF_RANGE_TO_PROMOTE = {SPARRING: 0.10}  # share of strikes thrown out of reach
 # Orienting graduation: mean facing (cos of bearing) per bout, and the steering test.
 ORIENT_FACING = 0.8
 STEER_MIN = 0.5  # turn command magnitude required at +-45 and +-90 deg, correct sign
@@ -73,7 +74,7 @@ def _worker(conn, n_envs: int, seed: int):
 
     def reset(k):
         opps[k] = opponents.make(stage, rng, slot=seed + k)
-        stats[k] = {"ret": 0.0, "throws": 0, "facing": 0.0, "ticks": 0}
+        stats[k] = {"ret": 0.0, "throws": 0, "facing": 0.0, "ticks": 0, "hits": 0, "oor": 0}
         envs[k].mode = "orient" if stage == ORIENT else "fight"
         return envs[k].reset()
 
@@ -90,13 +91,19 @@ def _worker(conn, n_envs: int, seed: int):
                 blue = opps[k].act(obs[k]["blue"]) if opps[k] else blue_cmds[k]
                 o, r, done, ev = env.step({"red": red_cmds[k], "blue": blue})
                 stats[k]["ret"] += r["red"]
-                stats[k]["throws"] += sum(e[0] == "throw" and e[1] == "red" for e in ev)
+                for e in ev:
+                    if e[0] == "throw" and e[1] == "red":
+                        stats[k]["throws"] += 1
+                        stats[k]["oor"] += env._distance() > STRIKE_REACH_CM
+                    elif e[0] == "hit" and e[1] == "red":
+                        stats[k]["hits"] += 1
                 stats[k]["facing"] += env._facing("red")
                 stats[k]["ticks"] += 1
                 done = done or env.t >= EPISODE_SECONDS[stage]
                 if done:
                     st = stats[k]
                     finished.append({"ret": st["ret"], "throws": st["throws"],
+                                     "hits": st["hits"], "oor": st["oor"],
                                      "facing": st["facing"] / max(st["ticks"], 1),
                                      "landed": env.score["red"].points,
                                      "taken": env.score["blue"].points})
@@ -310,7 +317,11 @@ def train(args):
         print(f"upd {update:4d} [{opponents.STAGES[stage]:8s}] steps {steps:8d} | "
               f"return {row[3]:+6.2f} landed {row[4]:4.2f} taken {row[5]:4.2f} "
               f"throws {row[6]:4.1f} facing {row[10]:+.2f} | ent {row[7]:.2f} "
-              f"vloss {row[8]:.3f} | {sps:.0f} steps/s",
+              f"vloss {row[8]:.3f} | {sps:.0f} steps/s"
+              + (f" | last {len(recent)} bouts: net {np.mean([f['landed'] - f['taken'] for f in recent]):+.1f}"
+                 f" acc {sum(f['hits'] for f in recent) / max(sum(f['throws'] for f in recent), 1):.0%}"
+                 f" out-of-range {sum(f['oor'] for f in recent) / max(sum(f['throws'] for f in recent), 1):.0%}"
+                 if recent else ""),
               flush=True)
         ck = dict(brain=brain.state_dict(), critic=critic.state_dict(), opt=opt.state_dict(),
                   stage=stage, update=update, steps=steps)
@@ -319,7 +330,9 @@ def train(args):
             torch.save(ck, out / f"update_{update:04d}.pt")
 
         net = [f["landed"] - f["taken"] for f in recent]
-        throws = np.mean([f["throws"] for f in recent]) if recent else np.inf
+        n_throw = sum(f["throws"] for f in recent)
+        accuracy = sum(f["hits"] for f in recent) / n_throw if n_throw else 0.0
+        out_of_range = sum(f["oor"] for f in recent) / n_throw if n_throw else 1.0
         full = len(recent) == recent.maxlen
         if stage == ORIENT and full and np.mean([f["facing"] for f in recent]) >= ORIENT_FACING:
             turns = steering_test(actor)
@@ -328,7 +341,8 @@ def train(args):
             graduate = steering_ok(turns)
         else:
             graduate = (stage in PROMOTE_AT and full and np.mean(net) >= PROMOTE_AT[stage]
-                        and throws <= MAX_THROWS_TO_PROMOTE.get(stage, np.inf))
+                        and accuracy >= MIN_ACCURACY_TO_PROMOTE.get(stage, 0.0)
+                        and out_of_range <= MAX_OUT_OF_RANGE_TO_PROMOTE.get(stage, 1.0))
         if graduate:
             torch.save(ck, out / f"graduated_{opponents.STAGES[stage]}.pt")
             stage += 1
