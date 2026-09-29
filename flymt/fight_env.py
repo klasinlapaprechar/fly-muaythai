@@ -21,7 +21,13 @@ TOUCH_SCALE = 0.05  # force that saturates the touch sensors
 KNOCKDOWN_UP = 0.3  # thorax "up" z below this = on its side or back
 KNOCKDOWN_SECONDS = 0.15
 KNOCKDOWN_POINTS = 5.0
-STRIKE_COST = 0.35  # per strike thrown: fatigue, so accuracy beats spamming
+STRIKE_COST = 0.2  # per strike thrown (fatigue)
+MISS_PENALTY = 0.3  # extra when a strike ends without landing
+LUNGE_MISS_PENALTY = 0.7  # extra on top for a missed lunge: an overcommitted miss
+HEAD_MULTIPLIER = 1.5  # strikes that land on the head score more
+COMBO_WINDOW = 0.5  # s: a different strike landing this soon after a hit...
+COMBO_BONUS = 0.5  # ...earns this on top
+BOX_STANCE_REWARD = 0.005  # per tick fighting from the boxing stance at range, facing
 # Fight-craft shaping. Per tick = per 10 ms; hits (1-2) and knockdowns (5) dominate.
 APPROACH_REWARD = 5.0  # per cm this fighter itself moves toward the opponent
 FACING_REWARD = 0.01  # per tick, scaled by cos(bearing)
@@ -33,8 +39,8 @@ CIRCLE_REWARD = 0.01  # per tick of sideways movement around the opponent, in ra
 CIRCLE_SPEED = 0.3  # cm/s of sideways speed that earns the full circling reward
 DEFEND_REWARD = 0.5  # opponent's strike misses while within striking range (slipped)
 BLOCK_BONUS = 0.3  # ...and it was thrown into a guard or boxing stance (blocked)
-RETREAT_GRACE = 0.5  # s of continuous backing off allowed (footwork after a strike)
-RETREAT_PENALTY = 0.03  # per tick of retreating beyond the grace period
+RETREAT_GRACE = 1.2  # s of continuous backing off that is just footwork
+RETREAT_PENALTY = 0.02  # per tick of excessive backing up beyond that
 PASSIVE_SECONDS = 1.0  # within ENGAGED_CM, going this long without a strike...
 PASSIVE_PENALTY = 0.03  # ...costs this per tick
 
@@ -114,6 +120,7 @@ class FightEnv:
         self._scored = {n: 0.0 for n in arena.FIGHTERS}
         self._retreat_time = {n: 0.0 for n in arena.FIGHTERS}
         self._since_strike = {n: 0.0 for n in arena.FIGHTERS}
+        self._last_hit = {n: (-1.0, None) for n in arena.FIGHTERS}  # (time, strike)
         return self.observe()
 
     def step(self, cmds: dict[str, np.ndarray]):
@@ -130,6 +137,9 @@ class FightEnv:
                 # A strike that ended without landing was slipped or blocked.
                 prev, cur = before[n], self.motor[n].active
                 ended = prev is not None and (cur is None or cur[1] < prev[1])
+                if ended and not self._landed[n]:
+                    rewards[n] -= MISS_PENALTY + (LUNGE_MISS_PENALTY if prev[0] == "lunge" else 0)
+                    events.append(("miss", n, prev[0]))
                 if ended and not self._landed[n] and self._distance() < RANGE_CM * 1.4:
                     defender = arena.FIGHTERS[1 - k]
                     rewards[defender] += DEFEND_REWARD
@@ -143,19 +153,25 @@ class FightEnv:
                     self._since_strike[n] = 0.0
                     rewards[n] -= STRIKE_COST
                     events.append(("throw", n, s))
-            for attacker, victim, force in self._scan_hits():
+            for attacker, victim, force, part in self._scan_hits():
                 strike = self.motor[attacker].active
                 if strike is None or self._landed[attacker] or force < HIT_FORCE:
                     continue
-                pts = HIT_POINTS[strike[0]]
+                pts = HIT_POINTS[strike[0]] * (HEAD_MULTIPLIER if part == 0 else 1.0)
                 self._landed[attacker] = True
+                t_last, s_last = self._last_hit[attacker]
+                if s_last is not None and s_last != strike[0] and self.t - t_last <= COMBO_WINDOW:
+                    rewards[attacker] += COMBO_BONUS
+                    events.append(("combo", attacker, s_last, strike[0]))
+                self._last_hit[attacker] = (self.t, strike[0])
                 sc = self.score[attacker]
                 sc.points += pts
                 sc.hits[strike[0]] = sc.hits.get(strike[0], 0) + 1
                 rewards[attacker] += pts
                 rewards[victim] -= pts
                 self._scored[attacker] += pts
-                events.append(("hit", attacker, strike[0], victim, force))
+                events.append(("hit", attacker, strike[0], victim, force,
+                               ("head", "thorax", "abdomen", "legs")[part]))
         self.t += BRAIN_DT
 
         done = self.t >= ROUND_SECONDS
@@ -188,6 +204,8 @@ class FightEnv:
                 r -= BACK_TURNED_PENALTY  # stay face to face
             if dist < ENGAGED_CM * 0.8 and facing > 0.7:
                 r += CIRCLE_REWARD * min(sideways / CIRCLE_SPEED, 1.0)
+                if self.motor[n].hold == "box":
+                    r += BOX_STANCE_REWARD
             # Running: backing off for too long.
             self._retreat_time[n] = (self._retreat_time[n] + BRAIN_DT
                                      if toward < -0.05 * BRAIN_DT else 0.0)
@@ -208,7 +226,7 @@ class FightEnv:
         return started
 
     def _scan_hits(self):
-        """Yield (attacker, victim, force) for strike-geom-on-target contacts.
+        """Return (attacker, victim, force, body part) for strike-on-target contacts.
 
         Also accumulates per-body-part touch for the mechanosensory inputs.
         """
@@ -226,7 +244,7 @@ class FightEnv:
                 victim = arena.FIGHTERS[ob]
                 self._touch[victim][self._geom_part[gb]] += fn
                 if ga in self._strike_set[oa] and gb in self._target_set[ob]:
-                    hits.append((arena.FIGHTERS[oa], victim, fn))
+                    hits.append((arena.FIGHTERS[oa], victim, fn, int(self._geom_part[gb])))
         return hits
 
     def _frame(self, n):
