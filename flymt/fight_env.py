@@ -33,12 +33,24 @@ APPROACH_REWARD = 5.0  # per cm this fighter itself moves toward the opponent
 FACING_REWARD = 0.01  # per tick, scaled by cos(bearing)
 IN_RANGE_REWARD = 0.02  # per tick within striking range and facing
 RANGE_CM = 0.25
-BACK_TURNED_PENALTY = 0.02  # per tick facing away while within ENGAGED_CM
+CLEAN_FACING = 0.707  # a strike only scores if the attacker faces the target within 45 deg
+SIDEWAYS_PENALTY = 0.04  # per tick in range, scaled from 0 (head-on) to full (back turned)
 ENGAGED_CM = 0.5
 CIRCLE_REWARD = 0.01  # per tick of sideways movement around the opponent, in range and facing
 CIRCLE_SPEED = 0.3  # cm/s of sideways speed that earns the full circling reward
 DEFEND_REWARD = 0.5  # opponent's strike misses while within striking range (slipped)
 BLOCK_BONUS = 0.3  # ...and it was thrown into a guard or boxing stance (blocked)
+# Resets: when an exchange goes bad (in range but not facing), back out and square up.
+BAD_FACING = 0.5  # facing below this (~60 deg off) while in range is a bad position
+RESET_OUT_REWARD = 3.0  # per cm backed out of a bad position
+RESET_DONE_DIST = 0.3  # cm: far enough out to count as reset...
+RESET_DONE_FACING = 0.87  # ...and squared up again (within 30 deg)
+RESET_BONUS = 0.4  # for completing a reset
+RESET_MAX_SECONDS = 1.5  # a reset that takes longer than this is abandoned
+# Clinch: control the opponent chest to chest and strike from there (knees).
+CLINCH_DIST = 0.18  # cm
+CLINCH_CONTROL_REWARD = 0.02  # per tick clinched, close and facing
+CLINCH_STRIKE_MULTIPLIER = 1.5  # strikes landed from the clinch score more
 RETREAT_GRACE = 1.0  # s of backing off *without throwing a strike* before it counts as running
 RETREAT_PENALTY = 0.02  # per tick of running (retreating without fighting back)
 PASSIVE_SECONDS = 1.0  # within ENGAGED_CM, going this long without a strike...
@@ -121,6 +133,7 @@ class FightEnv:
         self._retreat_time = {n: 0.0 for n in arena.FIGHTERS}
         self._since_strike = {n: 0.0 for n in arena.FIGHTERS}
         self._last_hit = {n: (-1.0, None) for n in arena.FIGHTERS}  # (time, strike)
+        self._resetting = {n: 0.0 for n in arena.FIGHTERS}  # seconds into a reset, 0 = none
         return self.observe()
 
     def step(self, cmds: dict[str, np.ndarray]):
@@ -159,7 +172,12 @@ class FightEnv:
                 strike = self.motor[attacker].active
                 if strike is None or self._landed[attacker] or force < HIT_FORCE:
                     continue
+                if self._facing(attacker) < CLEAN_FACING:
+                    continue  # side-on or backward contact is not a clean strike
                 pts = HIT_POINTS[strike[0]] * (HEAD_MULTIPLIER if part == 0 else 1.0)
+                if self.motor[attacker].hold == "clinch":
+                    pts *= CLINCH_STRIKE_MULTIPLIER
+                    events.append(("clinch_strike", attacker, strike[0]))
                 self._landed[attacker] = True
                 t_last, s_last = self._last_hit[attacker]
                 if s_last is not None and s_last != strike[0] and self.t - t_last <= COMBO_WINDOW:
@@ -202,23 +220,40 @@ class FightEnv:
             r = APPROACH_REWARD * toward + FACING_REWARD * facing
             if dist < RANGE_CM and facing > 0.8:
                 r += IN_RANGE_REWARD
-            if dist < ENGAGED_CM and facing < 0:
-                r -= BACK_TURNED_PENALTY  # stay face to face
+            if dist < ENGAGED_CM:
+                r -= SIDEWAYS_PENALTY * (1 - facing) / 2  # stay face to face
             if dist < ENGAGED_CM * 0.8 and facing > 0.7:
                 r += CIRCLE_REWARD * min(sideways / CIRCLE_SPEED, 1.0)
                 if self.motor[n].hold == "box":
                     r += BOX_STANCE_REWARD
+            # Resets: a bad position (in range, not facing) should be escaped by
+            # backing out and squaring up again, like breaking off a scramble.
+            if dist < RESET_DONE_DIST and facing < BAD_FACING and not self._resetting[n]:
+                self._resetting[n] = BRAIN_DT
+            if self._resetting[n]:
+                r += RESET_OUT_REWARD * max(-toward, 0.0)
+                self._resetting[n] += BRAIN_DT
+                if dist >= RESET_DONE_DIST and facing >= RESET_DONE_FACING:
+                    self._resetting[n] = 0.0  # out and squared up: reset complete
+                    r += RESET_BONUS
+                    events.append(("reset", n))
+                elif self._resetting[n] > RESET_MAX_SECONDS:
+                    self._resetting[n] = 0.0
+            if (self.motor[n].hold == "clinch" and dist < CLINCH_DIST and facing > CLEAN_FACING):
+                r += CLINCH_CONTROL_REWARD
             # Running: backing off without fighting back. Retreating while still
             # throwing strikes is fine (fighting off the back foot), so any strike
-            # resets the clock, as does stopping or coming forward.
+            # resets the clock, as does stopping or coming forward. A reset is not running.
             retreating = toward < -0.05 * BRAIN_DT
             self._retreat_time[n] = (self._retreat_time[n] + BRAIN_DT
-                                     if retreating and n not in threw else 0.0)
+                                     if retreating and n not in threw
+                                     and not self._resetting[n] else 0.0)
             if self._retreat_time[n] > RETREAT_GRACE:
                 r -= RETREAT_PENALTY
             # Not fighting back: in range but no strikes for too long.
             self._since_strike[n] += BRAIN_DT
-            if dist < ENGAGED_CM and self._since_strike[n] > PASSIVE_SECONDS:
+            if (dist < ENGAGED_CM and self._since_strike[n] > PASSIVE_SECONDS
+                    and not self._resetting[n]):
                 r -= PASSIVE_PENALTY
             rewards[n] += r
         return self.observe(), rewards, done, events

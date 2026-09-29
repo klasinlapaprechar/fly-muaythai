@@ -41,7 +41,7 @@ def _worker(conn, n_envs: int, seed: int):
     obs = [None] * n_envs
 
     def reset(k):
-        opps[k] = opponents.make(stage, rng)
+        opps[k] = opponents.make(stage, rng, slot=seed + k)
         stats[k] = {"ret": 0.0, "throws": 0}
         return envs[k].reset()
 

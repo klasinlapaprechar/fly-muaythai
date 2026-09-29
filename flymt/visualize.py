@@ -37,7 +37,8 @@ def record_bout(circuit: Circuit, ckpt: str | None, stage: int, seconds: float,
     brain = TorchBrain(circuit)
     if ckpt:
         brain.load_state_dict(torch.load(ckpt, map_location="cpu")["brain"])
-    opp = opponents.make(min(stage, 2), np.random.default_rng(seed))
+    # Videos use a scripted opponent so progress is comparable (Veteran from stage 3).
+    opp = opponents.make(stage, np.random.default_rng(seed), slot=0)
     renderer = mujoco.Renderer(env.model, 360, 480)
     cam = mujoco.MjvCamera()
     obs = env.reset()
