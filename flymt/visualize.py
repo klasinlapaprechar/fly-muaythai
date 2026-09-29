@@ -17,7 +17,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 from flymt import motor, opponents  # noqa: E402
-from flymt.brain import CHANNELS, Circuit, TorchBrain  # noqa: E402
+from flymt.brain import CHANNELS, Circuit, TorchBrain, to_command  # noqa: E402
 from flymt.connectome import ROLE_COLORS, display_positions  # noqa: E402
 from flymt.fight_env import FightEnv  # noqa: E402
 
@@ -37,17 +37,18 @@ def record_bout(circuit: Circuit, ckpt: str | None, stage: int, seconds: float,
     brain = TorchBrain(circuit)
     if ckpt:
         brain.load_state_dict(torch.load(ckpt, map_location="cpu")["brain"])
-    # Videos use a scripted opponent so progress is comparable (Veteran from stage 3).
+    # Videos use a scripted opponent so progress is comparable (Veteran in the mixed stage).
     opp = opponents.make(stage, np.random.default_rng(seed), slot=0)
+    env.mode = "orient" if stage == 0 else "fight"
     renderer = mujoco.Renderer(env.model, 360, 480)
     cam = mujoco.MjvCamera()
     obs = env.reset()
     h = brain.init_hidden(1)
     frames, rates, cmds, events = [], [], [], []
     while env.t < seconds:
-        cmd, _, h = brain.act(torch.from_numpy(obs["red"])[None], h,
-                              deterministic=not sample)
-        c = cmd[0].numpy()
+        action, _, h = brain.act(torch.from_numpy(obs["red"])[None], h,
+                                 deterministic=not sample)
+        c = to_command(action.numpy())[0]
         obs, _, done, ev = env.step({"red": c, "blue": opp.act(obs["blue"])})
         a, b = (env.data.xpos[env.idx[n].thorax_body] for n in ("red", "blue"))
         cam.lookat[:] = (a + b) / 2
@@ -145,8 +146,9 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--circuit", default="data/connectome/circuit.npz")
     ap.add_argument("--ckpt", default=None, help="checkpoint .pt (omit = untrained brain)")
-    ap.add_argument("--stage", type=int, default=2,
-                    help="0 bag, 1 mover, 2 sparring; -1 = the checkpoint's training stage")
+    ap.add_argument("--stage", type=int, default=3,
+                    help="0 orient, 1 bag, 2 mover, 3 sparring, 4 mixed (Veteran); "
+                         "-1 = the checkpoint's training stage")
     ap.add_argument("--seconds", type=float, default=4.0)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--sample", action="store_true", help="sample actions instead of greedy")

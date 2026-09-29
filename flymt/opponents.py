@@ -5,9 +5,10 @@ import numpy as np
 from flymt import motor
 from flymt.fight_env import OBS_FIELDS
 
-# Stage 3 mixes opponents: half the bouts against the Veteran, half against
+# Stage 0 teaches steering against a wandering target that never strikes.
+# Stage 4 mixes opponents: half the bouts against the Veteran, half against
 # past versions of the fly's own brain.
-STAGES = ("bag", "mover", "sparring", "mixed")
+STAGES = ("orient", "bag", "mover", "sparring", "mixed")
 _F = {k: i for i, k in enumerate(OBS_FIELDS)}
 _C = {k: i for i, k in enumerate(motor.COMMANDS)}
 
@@ -167,6 +168,6 @@ def make(stage: int, rng: np.random.Generator, slot: int = 0) -> Opponent | None
     In the mixed stage, even-numbered fight slots get the Veteran and
     odd-numbered slots get a past version of the brain.
     """
-    if stage == 3:
+    if stage == 4:
         return Veteran(rng) if slot % 2 == 0 else None
-    return {0: Opponent, 1: Mover, 2: Sparring}[stage](rng)
+    return {0: Mover, 1: Opponent, 2: Mover, 3: Sparring}[stage](rng)

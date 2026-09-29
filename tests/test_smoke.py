@@ -8,7 +8,7 @@ import scipy.sparse as sp
 import torch
 
 from flymt import motor, ppo
-from flymt.brain import CHANNELS, Circuit, TorchBrain
+from flymt.brain import ACTION_DIM, CHANNELS, Circuit, TorchBrain, to_command
 from flymt.fight_env import FightEnv
 
 
@@ -44,8 +44,10 @@ def test_brain_step_and_roundtrip(tmp_path):
     obs = torch.from_numpy(FightEnv(seed=0).reset()["red"])[None]
     h = brain.init_hidden(1)
     for _ in range(10):
-        cmd, logp, h = brain.act(obs, h)
-    assert cmd.shape == (1, len(motor.COMMANDS)) and torch.isfinite(logp).all()
+        action, logp, h = brain.act(obs, h)
+    assert action.shape == (1, ACTION_DIM) and torch.isfinite(logp).all()
+    cmd = to_command(action.numpy())
+    assert cmd.shape == (1, len(motor.COMMANDS)) and cmd[0, 2:].sum() <= 2  # <= 1 strike + 1 posture
     assert ((h >= 0) & (h <= 1)).all()
 
 
@@ -56,7 +58,8 @@ def test_ppo_updates(tmp_path):
         circuit=str(tmp_path / "c.npz"), out=str(tmp_path / "ck"), updates=2, workers=2,
         envs_per_worker=1, rollout=16, chunk=8, minibatch=4, epochs=1, lr=3e-4,
         gamma=0.99, lam=0.95, clip=0.2, vf_coef=0.5, ent_coef=0.01, max_grad=0.5,
-        promote_window=4, stage=0, save_every=1, seed=0, cpu=False, resume=False)
+        promote_window=4, stage=0, save_every=1, seed=0, cpu=False, resume=False,
+        stop_at_stage=None, set_stage=None, note="")
     ppo.train(args)
     ck = torch.load(tmp_path / "ck" / "latest.pt")
     assert ck["update"] == 1 and ck["steps"] == 2 * 16 * 2

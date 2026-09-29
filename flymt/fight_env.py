@@ -30,11 +30,15 @@ COMBO_BONUS = 0.5  # ...earns this on top
 BOX_STANCE_REWARD = 0.005  # per tick fighting from the boxing stance at range, facing
 # Fight-craft shaping. Per tick = per 10 ms; hits (1-2) and knockdowns (5) dominate.
 APPROACH_REWARD = 5.0  # per cm this fighter itself moves toward the opponent
-FACING_REWARD = 0.01  # per tick, scaled by cos(bearing)
+FACING_REWARD = 0.02  # per tick, scaled by cos(bearing)
 IN_RANGE_REWARD = 0.02  # per tick within striking range and facing
 RANGE_CM = 0.25
 CLEAN_FACING = 0.707  # a strike only scores if the attacker faces the target within 45 deg
-SIDEWAYS_PENALTY = 0.04  # per tick in range, scaled from 0 (head-on) to full (back turned)
+SIDEWAYS_PENALTY = 0.06  # per tick in range, scaled from 0 (head-on) to full (back turned)
+UNFACED_STRIKE_PENALTY = 0.3  # throwing a strike while not facing within 45 deg
+# Orienting stage: the reward is only about keeping the opponent dead ahead.
+ORIENT_REWARD = 0.02  # per tick, scaled by cos(bearing)
+ORIENT_AWAY_PENALTY = 0.02  # per tick with the opponent behind
 ENGAGED_CM = 0.5
 CIRCLE_REWARD = 0.01  # per tick of sideways movement around the opponent, in range and facing
 CIRCLE_SPEED = 0.3  # cm/s of sideways speed that earns the full circling reward
@@ -81,7 +85,8 @@ class Score:
 
 
 class FightEnv:
-    def __init__(self, seed: int | None = None):
+    def __init__(self, seed: int | None = None, mode: str = "fight"):
+        self.mode = mode  # "fight", or "orient" (reward only for facing the opponent)
         self.model, self.idx = arena.build()
         self.model.opt.timestep = PHYSICS_DT
         self.model.opt.noslip_iterations = 0
@@ -117,6 +122,8 @@ class FightEnv:
             x = side * self.rng.uniform(0.2, 0.4)
             y = self.rng.uniform(-0.2, 0.2)
             yaw = (0.0 if k == 0 else np.pi) + self.rng.uniform(-0.6, 0.6)
+            if self.mode == "orient":  # start pointing anywhere: facing must be earned
+                yaw = self.rng.uniform(-np.pi, np.pi)
             d.qpos[f.qpos_adr:f.qpos_adr + 3] = [x, y, 0.105]
             d.qpos[f.qpos_adr + 3:f.qpos_adr + 7] = [np.cos(yaw / 2), 0, 0, np.sin(yaw / 2)]
         for m in self.motor.values():
@@ -167,6 +174,8 @@ class FightEnv:
                     self._since_strike[n] = 0.0
                     threw.add(n)
                     rewards[n] -= STRIKE_COST
+                    if self._facing(n) < CLEAN_FACING:
+                        rewards[n] -= UNFACED_STRIKE_PENALTY  # not picking its shot
                     events.append(("throw", n, s))
             for attacker, victim, force, part in self._scan_hits():
                 strike = self.motor[attacker].active
@@ -206,6 +215,14 @@ class FightEnv:
                 self._scored[other] += KNOCKDOWN_POINTS
                 events.append(("knockdown", other, n))
                 done = True
+        if self.mode == "orient":
+            for n in arena.FIGHTERS:
+                facing = self._facing(n)
+                kd = (KNOCKDOWN_POINTS if any(e[0] == "knockdown" and e[2] == n for e in events)
+                      else 0.0)
+                rewards[n] = (ORIENT_REWARD * facing
+                              - (ORIENT_AWAY_PENALTY if facing < 0 else 0.0) - kd)
+            return self.observe(), rewards, done, events
         # Fight-craft shaping, scored on each fighter's own movement.
         dist = self._distance()
         for k, n in enumerate(arena.FIGHTERS):

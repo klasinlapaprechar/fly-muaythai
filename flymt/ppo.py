@@ -20,15 +20,41 @@ import numpy as np
 import torch
 from torch import nn
 
-from flymt import motor, opponents
-from flymt.brain import Circuit, TorchBrain
+from flymt import opponents
+from flymt.brain import ACTION_DIM, Circuit, TorchBrain, to_command
 from flymt.fight_env import OBS_FIELDS, FightEnv
 
-EPISODE_SECONDS = {0: 3.0, 1: 3.0, 2: 4.0, 3: 6.0}
+ORIENT, BAG, MOVER, SPARRING, MIXED = range(len(opponents.STAGES))
+EPISODE_SECONDS = {ORIENT: 3.0, BAG: 3.0, MOVER: 3.0, SPARRING: 4.0, MIXED: 6.0}
 # Promote when the mean net score (points landed - taken) per bout reaches this.
-PROMOTE_AT = {0: 3.0, 1: 3.0, 2: 8.0}
+PROMOTE_AT = {BAG: 3.0, MOVER: 3.0, SPARRING: 8.0}
 # ...and, where listed, throw at most this many strikes per bout (accuracy, not spam).
-MAX_THROWS_TO_PROMOTE = {2: 15.0}
+MAX_THROWS_TO_PROMOTE = {SPARRING: 15.0}
+# Orienting graduation: mean facing (cos of bearing) per bout, and the steering test.
+ORIENT_FACING = 0.8
+STEER_MIN = 0.5  # turn command magnitude required at +-45 and +-90 deg, correct sign
+
+
+def steering_test(brain: TorchBrain) -> dict[int, float]:
+    """Turn command for an opponent held at each angle (+ = on the left)."""
+    f = {k: i for i, k in enumerate(OBS_FIELDS)}
+    out = {}
+    for deg in (-90, -45, -15, 0, 15, 45, 90):
+        o = torch.zeros(1, len(OBS_FIELDS))
+        r = np.radians(deg)
+        o[0, f["opp_dist"]], o[0, f["up"]] = 0.25, 1.0
+        o[0, f["opp_bearing_sin"]], o[0, f["opp_bearing_cos"]] = np.sin(r), np.cos(r)
+        h = brain.init_hidden(1)
+        with torch.no_grad():
+            for _ in range(40):
+                res, h = brain(o, h)
+        out[deg] = float(res[0][0, 1])
+    return out
+
+
+def steering_ok(turns: dict[int, float]) -> bool:
+    return all(turns[d] >= STEER_MIN for d in (45, 90)) and all(
+        turns[d] <= -STEER_MIN for d in (-45, -90))
 
 
 # --------------------------------------------------------------- fight workers
@@ -42,7 +68,8 @@ def _worker(conn, n_envs: int, seed: int):
 
     def reset(k):
         opps[k] = opponents.make(stage, rng, slot=seed + k)
-        stats[k] = {"ret": 0.0, "throws": 0}
+        stats[k] = {"ret": 0.0, "throws": 0, "facing": 0.0, "ticks": 0}
+        envs[k].mode = "orient" if stage == ORIENT else "fight"
         return envs[k].reset()
 
     while True:
@@ -59,9 +86,14 @@ def _worker(conn, n_envs: int, seed: int):
                 o, r, done, ev = env.step({"red": red_cmds[k], "blue": blue})
                 stats[k]["ret"] += r["red"]
                 stats[k]["throws"] += sum(e[0] == "throw" and e[1] == "red" for e in ev)
+                stats[k]["facing"] += env._facing("red")
+                stats[k]["ticks"] += 1
                 done = done or env.t >= EPISODE_SECONDS[stage]
                 if done:
-                    finished.append({**stats[k], "landed": env.score["red"].points,
+                    st = stats[k]
+                    finished.append({"ret": st["ret"], "throws": st["throws"],
+                                     "facing": st["facing"] / max(st["ticks"], 1),
+                                     "landed": env.score["red"].points,
                                      "taken": env.score["blue"].points})
                     o = reset(k)
                 obs[k] = o
@@ -163,9 +195,9 @@ def train(args):
 
     def start_stage():
         nonlocal opp_h
-        if stage == 3 and not hall:
+        if stage == MIXED and not hall:
             hall.append(_cpu_state(brain))
-        if stage == 3:
+        if stage == MIXED:
             opp_brain.load_state_dict(hall[np.random.randint(len(hall))])
         opp_h = opp_brain.init_hidden(N)
         return vec.set_stage(stage)
@@ -181,12 +213,12 @@ def train(args):
     log = csv.writer(logf)
     if new_log:
         log.writerow(["update", "stage", "steps", "ep_return", "landed", "taken",
-                      "throws", "entropy", "value_loss", "sps"])
+                      "throws", "entropy", "value_loss", "sps", "facing"])
 
     for update in range(update0, update0 + args.updates):
         t0 = time.time()
         buf_obs = np.zeros((T, N, obs_size), np.float32)
-        buf_act = np.zeros((T, N, len(motor.COMMANDS)), np.float32)
+        buf_act = np.zeros((T, N, ACTION_DIM), np.float32)
         buf_logp = np.zeros((T, N), np.float32)
         buf_rew = np.zeros((T, N), np.float32)
         buf_done = np.zeros((T, N), np.float32)  # bout ended after step t
@@ -197,10 +229,10 @@ def train(args):
                 buf_h0[t // L] = h.numpy()
             act, logp, h = actor.act(torch.from_numpy(obs), h)
             blue = None
-            if stage == 3:
+            if stage == MIXED:
                 blue_t, _, opp_h = opp_brain.act(torch.from_numpy(blue_obs), opp_h)
-                blue = blue_t.numpy()
-            nobs, nblue, rew, done, fin = vec.step(act.numpy(), blue)
+                blue = to_command(blue_t.numpy())
+            nobs, nblue, rew, done, fin = vec.step(to_command(act.numpy()), blue)
             buf_obs[t], buf_act[t], buf_logp[t] = obs, act.numpy(), logp.numpy()
             buf_rew[t], buf_done[t] = rew, done
             fresh = 1 - torch.from_numpy(done.astype(np.float32))[:, None]
@@ -267,12 +299,13 @@ def train(args):
         mean = lambda k: float(np.mean([f[k] for f in finished])) if finished else float("nan")  # noqa: E731
         sps = T * N / (time.time() - t0)
         row = [update, stage, steps, mean("ret"), mean("landed"), mean("taken"),
-               mean("throws"), ent_sum / n_mb, vl_sum / n_mb, round(sps)]
+               mean("throws"), ent_sum / n_mb, vl_sum / n_mb, round(sps), mean("facing")]
         log.writerow([round(x, 3) if isinstance(x, float) else x for x in row])
         logf.flush()
         print(f"upd {update:4d} [{opponents.STAGES[stage]:8s}] steps {steps:8d} | "
               f"return {row[3]:+6.2f} landed {row[4]:4.2f} taken {row[5]:4.2f} "
-              f"throws {row[6]:4.1f} | ent {row[7]:.2f} vloss {row[8]:.3f} | {sps:.0f} steps/s",
+              f"throws {row[6]:4.1f} facing {row[10]:+.2f} | ent {row[7]:.2f} "
+              f"vloss {row[8]:.3f} | {sps:.0f} steps/s",
               flush=True)
         ck = dict(brain=brain.state_dict(), critic=critic.state_dict(), opt=opt.state_dict(),
                   stage=stage, update=update, steps=steps)
@@ -282,16 +315,28 @@ def train(args):
 
         net = [f["landed"] - f["taken"] for f in recent]
         throws = np.mean([f["throws"] for f in recent]) if recent else np.inf
-        if (stage in PROMOTE_AT and len(recent) == recent.maxlen
-                and np.mean(net) >= PROMOTE_AT[stage]
-                and throws <= MAX_THROWS_TO_PROMOTE.get(stage, np.inf)):
+        full = len(recent) == recent.maxlen
+        if stage == ORIENT and full and np.mean([f["facing"] for f in recent]) >= ORIENT_FACING:
+            turns = steering_test(actor)
+            print("   steering test (turn by opponent angle): "
+                  + " ".join(f"{d:+d}:{v:+.2f}" for d, v in turns.items()), flush=True)
+            graduate = steering_ok(turns)
+        else:
+            graduate = (stage in PROMOTE_AT and full and np.mean(net) >= PROMOTE_AT[stage]
+                        and throws <= MAX_THROWS_TO_PROMOTE.get(stage, np.inf))
+        if graduate:
             torch.save(ck, out / f"graduated_{opponents.STAGES[stage]}.pt")
             stage += 1
             recent.clear()
             print(f"==> promoted to {opponents.STAGES[stage]}", flush=True)
+            if args.stop_at_stage is not None and stage >= args.stop_at_stage:
+                torch.save({**ck, "stage": stage}, out / "latest.pt")
+                print(f"reached stage {opponents.STAGES[stage]}: stopping as requested",
+                      flush=True)
+                break
             obs, blue_obs = start_stage()
             h = actor.init_hidden(N)
-        elif stage == 3 and update % 20 == 0:
+        elif stage == MIXED and update % 20 == 0:
             hall.append(_cpu_state(brain))
             opp_brain.load_state_dict(hall[np.random.randint(len(hall))])
     vec.close()
@@ -318,12 +363,15 @@ def main():
     ap.add_argument("--ent-coef", type=float, default=0.003)
     ap.add_argument("--max-grad", type=float, default=0.5)
     ap.add_argument("--promote-window", type=int, default=48)
-    ap.add_argument("--stage", type=int, default=0, choices=range(4))
+    ap.add_argument("--stage", type=int, default=0, choices=range(len(opponents.STAGES)))
+    ap.add_argument("--stop-at-stage", type=int, default=None,
+                    help="stop (after saving) once training is promoted into this stage")
     ap.add_argument("--save-every", type=int, default=25)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--cpu", action="store_true", help="train on CPU instead of MPS")
     ap.add_argument("--resume", action="store_true")
-    ap.add_argument("--set-stage", type=int, default=None, choices=range(4),
+    ap.add_argument("--set-stage", type=int, default=None,
+                    choices=range(len(opponents.STAGES)),
                     help="with --resume: override the saved curriculum stage")
     ap.add_argument("--note", default="", help="with --resume: note for checkpoints/events.txt")
     train(ap.parse_args())

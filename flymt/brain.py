@@ -29,8 +29,18 @@ _F = {k: i for i, k in enumerate(OBS_FIELDS)}
 CHANNELS = ("vis_target_left", "vis_target_right", "looming", "touch_head",
             "touch_body", "touch_legs", "balance", "aggression", "dopamine")
 DN_REST_BIAS = -0.5
+# Initial recurrent weight scale (log). At full strength the circuit saturates
+# (right DNa02 pinned on regardless of vision); at half strength DNa02 and other
+# DNs respond to where the opponent is.
+W_SCALE_INIT = float(np.log(0.5))
 N_CONT = 2  # forward, turn
-N_BIN = len(motor.COMMANDS) - N_CONT
+# Strikes and postures are each ONE choice per tick, with "none" as the default,
+# so doing nothing is a single decision rather than five coin flips.
+STRIKE_CHOICES = ("none",) + motor.STRIKES
+POSTURE_CHOICES = ("none", "guard", "box", "clinch")
+N_OUT = N_CONT + len(STRIKE_CHOICES) + len(POSTURE_CHOICES)
+ACTION_DIM = N_CONT + 2  # [forward, turn, strike index, posture index]
+_CMD = {k: i for i, k in enumerate(motor.COMMANDS)}
 
 
 def sensory_drive(obs: torch.Tensor) -> torch.Tensor:
@@ -122,19 +132,37 @@ class TorchBrain(nn.Module):
                              shape=(len(self.dn_keys), circuit.n))
         self.register_buffer("P", _to_torch_sparse(pool))
 
-        n_t, n_dn, n_cmd = len(types), len(self.dn_keys), len(motor.COMMANDS)
+        n_t, n_dn = len(types), len(self.dn_keys)
         self.log_gain = nn.Parameter(torch.zeros(n_t))
         self.bias = nn.Parameter(torch.zeros(n_t))
         self.input_gain = nn.Parameter(torch.ones(len(CHANNELS)))
-        self.w_scale = nn.Parameter(torch.zeros(()))
-        self.readout = nn.Linear(n_dn, n_cmd)
-        self.log_std = nn.Parameter(torch.full((N_CONT,), -0.5))
+        self.w_scale = nn.Parameter(torch.full((), W_SCALE_INIT))
+        self.readout = nn.Linear(n_dn, N_OUT)
+        self.log_std = nn.Parameter(torch.full((N_CONT,), -1.2))  # std 0.3
         self._seed_readout()
         with torch.no_grad():
             # Descending neurons are quiet at rest in real flies; start them there.
             is_dn = np.zeros(n_t, bool)
             is_dn[np.unique(type_idx[circuit.role == "dn"])] = True
             self.bias[torch.from_numpy(is_dn)] = DN_REST_BIAS
+        self._calibrate_steering()
+
+    @torch.no_grad()
+    def _calibrate_steering(self):
+        """Offset the turn command so an opponent dead ahead means 'no turn'.
+
+        At rest the right DNa02 is more active than the left, which alone would
+        make the fly circle right. This only sets the starting point; training
+        is free to change it.
+        """
+        obs = torch.zeros(1, len(OBS_FIELDS))
+        obs[0, _F["opp_dist"]] = 0.25
+        obs[0, _F["opp_bearing_cos"]] = 1.0
+        obs[0, _F["up"]] = 1.0
+        h = self.init_hidden(1)
+        for _ in range(40):
+            out, h = self(obs, h)
+        self.readout.bias[1] -= torch.atanh(out[0][0, 1].clamp(-0.999, 0.999))
 
     @torch.no_grad()
     def _seed_readout(self):
@@ -142,20 +170,21 @@ class TorchBrain(nn.Module):
         # Scale by fan-in so ~1000 DN groups don't sum to saturated commands.
         nn.init.normal_(self.readout.weight, 0, 0.3 / np.sqrt(self.readout.in_features))
         nn.init.zeros_(self.readout.bias)
-        self.readout.bias[N_CONT:] = -3.5  # strikes start rare, not spammed
-        cmd = {k: i for i, k in enumerate(motor.COMMANDS)}
+        s0, p0 = N_CONT, N_CONT + len(STRIKE_CHOICES)
+        self.readout.bias[s0] = 4.5  # "no strike" is the default (~5% strike per tick)
+        self.readout.bias[p0] = 2.0  # "no posture" is the default
         for j, key in enumerate(self.dn_keys):
             t, side = key.split("|")
             if t.startswith("DNa02"):  # steering: left DNa02 turns left
-                self.readout.weight[cmd["turn"], j] += 2.0 if side == "L" else -2.0
+                self.readout.weight[1, j] += 2.0 if side == "L" else -2.0
             if t.startswith(("DNp09", "oDN1")):  # forward walking
-                self.readout.weight[cmd["forward"], j] += 2.0
+                self.readout.weight[0, j] += 2.0
 
     def init_hidden(self, batch: int) -> torch.Tensor:
         return torch.zeros(batch, self.c.n, device=self.S.device)
 
     def forward(self, obs: torch.Tensor, h: torch.Tensor):
-        """One 10 ms tick. obs (B, F), h (B, N) -> (mean, log_std, logits), h."""
+        """One 10 ms tick. obs (B, F), h (B, N) -> (mean, log_std, strike, posture), h."""
         drive = (sensory_drive(obs) * self.input_gain) @ self.S  # (B, N)
         gain = torch.exp(self.log_gain.clamp(-3, 3))[self.type_idx] * torch.exp(self.w_scale)
         bias = self.bias[self.type_idx]
@@ -166,34 +195,54 @@ class TorchBrain(nn.Module):
         h = r.T
         dn = torch.sparse.mm(self.P, r).T  # (B, n_dn)
         z = self.readout(dn)
+        s0, p0 = N_CONT, N_CONT + len(STRIKE_CHOICES)
         return (torch.tanh(z[:, :N_CONT]), self.log_std.expand(len(z), -1),
-                z[:, N_CONT:]), h
+                z[:, s0:p0], z[:, p0:]), h
 
     @staticmethod
     def distribution(out):
-        mean, log_std, logits = out
+        mean, log_std, strike, posture = out
         return (torch.distributions.Normal(mean, log_std.exp()),
-                torch.distributions.Bernoulli(logits=logits))
+                torch.distributions.Categorical(logits=strike),
+                torch.distributions.Categorical(logits=posture))
 
     @torch.no_grad()
     def act(self, obs: torch.Tensor, h: torch.Tensor, deterministic: bool = False):
-        """Sample commands. Returns (cmd (B, n_cmd), log_prob (B,), h)."""
+        """Choose an action. Returns (action (B, ACTION_DIM), log_prob (B,), h).
+
+        The action is [forward, turn, strike index, posture index]; turn it into
+        a motor command with `to_command`.
+        """
         out, h = self(obs, h)
-        cont, binary = self.distribution(out)
+        cont, strike, posture = self.distribution(out)
         if deterministic:
-            a_c, a_b = out[0], (out[2] > 0).float()
+            a_c, a_s, a_p = out[0], out[2].argmax(1), out[3].argmax(1)
         else:
-            a_c, a_b = cont.sample(), binary.sample()
-        logp = cont.log_prob(a_c).sum(1) + binary.log_prob(a_b).sum(1)
-        # Raw sample (not clipped) so PPO scores exactly the action taken; the
-        # motor system bounds walk/turn itself.
-        return torch.cat([a_c, a_b], 1), logp, h
+            a_c, a_s, a_p = cont.sample(), strike.sample(), posture.sample()
+        logp = cont.log_prob(a_c).sum(1) + strike.log_prob(a_s) + posture.log_prob(a_p)
+        # Raw walk/turn sample (not clipped) so PPO scores exactly the action taken;
+        # the motor system bounds walk/turn itself.
+        return torch.cat([a_c, a_s[:, None].float(), a_p[:, None].float()], 1), logp, h
 
     def log_prob(self, out, action):
-        cont, binary = self.distribution(out)
+        cont, strike, posture = self.distribution(out)
         return (cont.log_prob(action[:, :N_CONT]).sum(1)
-                + binary.log_prob(action[:, N_CONT:]).sum(1))
+                + strike.log_prob(action[:, N_CONT].long())
+                + posture.log_prob(action[:, N_CONT + 1].long()))
 
     def entropy(self, out):
-        cont, binary = self.distribution(out)
-        return cont.entropy().sum(1) + binary.entropy().sum(1)
+        cont, strike, posture = self.distribution(out)
+        return cont.entropy().sum(1) + strike.entropy() + posture.entropy()
+
+
+def to_command(action: np.ndarray) -> np.ndarray:
+    """[forward, turn, strike index, posture index] rows -> motor command rows."""
+    action = np.atleast_2d(action)
+    cmd = np.zeros((len(action), len(motor.COMMANDS)), np.float32)
+    cmd[:, :N_CONT] = action[:, :N_CONT]
+    for i, (s, p) in enumerate(action[:, N_CONT:].astype(int)):
+        if s:
+            cmd[i, _CMD[STRIKE_CHOICES[s]]] = 1.0
+        if p:
+            cmd[i, _CMD[POSTURE_CHOICES[p]]] = 1.0
+    return cmd
