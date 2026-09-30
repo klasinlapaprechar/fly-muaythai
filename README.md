@@ -98,6 +98,36 @@ Strikes to the head score ×1.5. Strikes from the clinch score ×1.25, and knees
 
 ---
 
+## Fight it yourself
+
+You play the blue fly. The red fly is the trained brain, and the panel on the right shows its neurons firing as it fights you.
+
+<p align="center">
+  <img src="docs/media/play.gif" width="720" alt="Play mode: first-person view, then over the shoulder, with the opponent's brain activity on the right">
+  <br><em>Play mode, recorded with a scripted player: first person, then over the shoulder (Tab).</em>
+</p>
+
+```bash
+python -m flymt.play                  # hard: the final trained brain (update 2,000)
+python -m flymt.play --level medium   # update 500 (easy: update 100)
+python -m flymt.play --speed 0.2      # slower "fly time"
+```
+
+| Keys | Action |
+|---|---|
+| W / S · A / D | Walk forward / back · turn left / right |
+| J / K | Left / right jab |
+| U / I | Left / right kick |
+| L | Lunge (knee) |
+| Space · B · C (hold) | Guard · boxing stance · clinch |
+| Tab | First person ↔ over the shoulder |
+| + / − | Faster / slower |
+| G · P · R · Esc | Shadows (slower) · pause · new round · quit |
+
+The game runs in **"fly time"** (0.25× real speed by default), because a fly's jab takes ~90 ms, faster than human reaction. It renders at ~28 fps on an 8 GB MacBook.
+
+---
+
 ## How it works
 
 ```mermaid
@@ -162,8 +192,10 @@ Standard RL, with no scripted decisions in the brain. Twelve bouts run in parall
 | 0. Orient | Wanders, never strikes; the fly starts facing a random direction | Mean facing ≥ 0.8, and it passes a steering test (turns the correct way at ±15°, ±45°, ±90°, and holds steady dead ahead) | Update 293 |
 | 1. Heavy bag | Stands still | Net +3 points per bout | Update 328 |
 | 2. Mover | Wanders | Net +3 points per bout | Update 333 |
-| 3. Sparring | Circles, steps in to strike, retreats, guards | Net +8 points per bout with accurate striking | In progress |
-| 4. Mixed | Half the bouts: a scripted "veteran" that counter-punches, throws combinations and clinches. Half: past versions of its own brain (self-play). | – | – |
+| 3. Sparring | Circles, steps in to strike, retreats, guards | Net +8 points per bout, ≥ 55% of strikes landing, ≤ 10% thrown out of range | Update 742 |
+| 4. Mixed | Half the bouts: a scripted "veteran" that counter-punches, throws combinations and clinches. Half: past versions of its own brain (self-play). | – | Trained to update 2,000 |
+
+**Final result (update 2,000):** over the last 48 mixed-stage bouts against the veteran and its own past selves, the fly netted **+9.1 points per bout**, with **65% of strikes landing**, **5% thrown out of range**, and facing its opponent **+0.95** (1.0 = dead ahead). In its final video bout it beat the veteran **60.9 to 46.3**, after losing to it at updates 1,000 and 1,500. It trained for about 6.1 million decisions, roughly 17 hours of simulated fighting.
 
 **Reward design, in short:**
 - **Scoring:** points for clean strikes, knockdowns and combinations.
@@ -202,6 +234,7 @@ python -m flymt.ppo                              # train from scratch
 python -m flymt.ppo --resume                     # continue from checkpoints/latest.pt
 python -m flymt.visualize --ckpt checkpoints/latest.pt --stage -1 --sample   # watch a bout
 python -m flymt.moves_demo                       # render every move in slow motion
+python -m flymt.play                             # fight the trained fly yourself
 pytest -q                                        # smoke tests
 ```
 
@@ -215,20 +248,16 @@ pytest -q                                        # smoke tests
 | `flymt/motor.py` | Tripod gait, strikes and postures from IK keyframes |
 | `flymt/arena.py`, `flymt/ik.py` | Two-fly ring and per-leg inverse kinematics |
 | `flymt/visualize.py`, `flymt/moves_demo.py` | Bout videos with live brain activity, and the move library |
+| `flymt/play.py` | Play mode: first-person fight against the trained brain |
 
 ## Status
 
 - [x] Connectome circuit, physics, motor system, referee
 - [x] Recurrent PPO on Apple GPU with curriculum and self-play
-- [x] Stages 0–2 (orient, heavy bag, mover)
-- [ ] Stage 3 (sparring), then the mixed stage with self-play
+- [x] Full curriculum trained: orient → heavy bag → mover → sparring → mixed (veteran + self-play), 2,000 updates
+- [x] **Play mode** (`python -m flymt.play`): first person or over the shoulder, fly time, live brain panel, three difficulty levels
 - [ ] Final tournament against earlier versions and the veteran
-- [ ] **Play mode** (`python -m flymt.play`): fight the trained fly yourself
-  - You control the blue fly with the same commands the brain uses (walk, turn, jabs, kicks, lunge, guard, boxing stance, clinch), from the keyboard or a gamepad
-  - First-person view from the fly's head cameras, or an over-the-shoulder view
-  - "Fly time": runs slowed to ~0.2–0.3× by default (a fly's jab takes ~90 ms, faster than human reaction), with adjustable speed
-  - Live panel showing the trained fly's neurons firing as it fights you
-  - Difficulty levels from earlier checkpoints: easy (update 100), medium (update 500), hard (final)
+- [ ] Gamepad support for play mode
 - [ ] Larger circuit (~20–30K neurons, including the male-specific *fruitless* aggression neurons)
 
 ## Credits

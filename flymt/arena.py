@@ -46,6 +46,8 @@ def _build_mjcf() -> mjcf.RootElement:
     root.asset.add("texture", name="grid", type="2d", builtin="checker",
                    rgb1=".22 .24 .28", rgb2=".18 .2 .23", width=300, height=300)
     root.asset.add("material", name="canvas", texture="grid", texrepeat="12 12")
+    root.asset.add("texture", name="sky", type="skybox", builtin="gradient",
+                   rgb1=".32 .42 .55", rgb2=".08 .1 .14", width=256, height=256)
     root.worldbody.add("light", pos=(0, 0, 3), dir=(0, 0, -1), directional=True)
     root.worldbody.add("geom", name="floor", type="plane", size=(2, 2, 0.1),
                        material="canvas", friction=(1, 0.005, 0.0001))
@@ -68,6 +70,10 @@ def _build_mjcf() -> mjcf.RootElement:
         fly = FruitFly(name=name, use_wings=False, use_mouth=False,
                        use_antennae=False, joint_filter=0.0)
         model = fly.mjcf_model
+        # First-person camera on the thorax, at about eye height just above the
+        # head, looking forward and slightly down so the forelegs are in view.
+        model.find("body", "thorax").add(
+            "camera", name="fpv", pos=(0.07, 0, 0.075), xyaxes=(0, -1, 0, 0.3, 0, 1), fovy=95)
         # Tint the fighter so the corners are obvious.
         for mat in model.find_all("material"):
             if mat.name in ("body", "blue", "red"):

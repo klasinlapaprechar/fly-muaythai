@@ -105,6 +105,7 @@ class Score:
 class FightEnv:
     def __init__(self, seed: int | None = None, mode: str = "fight"):
         self.mode = mode  # "fight", or "orient" (reward only for facing the opponent)
+        self.round_seconds = ROUND_SECONDS
         self.model, self.idx = arena.build()
         self.model.opt.timestep = PHYSICS_DT
         self.model.opt.noslip_iterations = 0
@@ -226,7 +227,7 @@ class FightEnv:
                                ("head", "thorax", "abdomen", "legs")[part]))
         self.t += BRAIN_DT
 
-        done = self.t >= ROUND_SECONDS
+        done = self.t >= self.round_seconds
         for k, n in enumerate(arena.FIGHTERS):
             other = arena.FIGHTERS[1 - k]
             self._down_time[n] = self._down_time[n] + BRAIN_DT if self._up(n) < KNOCKDOWN_UP else 0.0
