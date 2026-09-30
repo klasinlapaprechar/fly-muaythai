@@ -33,8 +33,11 @@ from flymt.brain import Circuit, TorchBrain, to_command
 from flymt.connectome import ROLE_COLORS, display_positions
 from flymt.fight_env import FightEnv
 
-LEVELS = {"easy": "checkpoints/update_0100.pt", "medium": "checkpoints/update_0500.pt",
-          "hard": "checkpoints/latest.pt"}
+# Shipped fighters (models/, written by flymt.export_models); every level is the
+# same connectome brain at a different point in training.
+LEVELS = {"easy": "models/fighter_easy.pt", "medium": "models/fighter_medium.pt",
+          "hard": "models/fighter_hard.pt"}
+CIRCUIT = "models/circuit.npz"
 STRIKE_NAMES = {"jab_l": "LEFT JAB", "jab_r": "RIGHT JAB", "kick_l": "LEFT KICK",
                 "kick_r": "RIGHT KICK", "lunge": "LUNGE"}
 WIN_W, WIN_H = 1280, 720
@@ -64,11 +67,15 @@ class Game:
         m = self.env.model
         m.vis.global_.offwidth, m.vis.global_.offheight = VIEW_W, WIN_H
         self.renderer = mujoco.Renderer(m, WIN_H, VIEW_W)
-        circuit = Circuit.load("data/connectome/circuit.npz")
+        circuit = Circuit.load(CIRCUIT)
         self.brain = TorchBrain(circuit)
         path = ckpt or LEVELS[level]
         state = torch.load(path, map_location="cpu")
-        self.brain.load_state_dict(state["brain"])
+        # Shipped fighters hold only learned parameters; the fixed wiring (buffers)
+        # is rebuilt from the circuit. Anything else missing is an error.
+        missing, unexpected = self.brain.load_state_dict(state["brain"], strict=False)
+        buffers = {n for n, _ in self.brain.named_buffers()}
+        assert not unexpected and set(missing) <= buffers, (missing, unexpected)
         self.level = f"{level} (update {state['update']})" if not ckpt else Path(ckpt).name
         self.speed, self.view, self.paused = speed, view, False
         self.shadows = False  # shadows + reflections cost ~70 ms a frame; G toggles

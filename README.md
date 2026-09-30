@@ -107,10 +107,31 @@ You play the blue fly. The red fly is the trained brain, and the panel on the ri
   <br><em>Play mode, recorded with a scripted player: first person, then over the shoulder (Tab).</em>
 </p>
 
+### Download and play
+
+The trained fighters ship with the repo in `models/` (about 1.4 MB), so there's no training and no neuPrint account needed to play.
+
+**Requirements:** Python 3.11 or 3.12 and about 2 GB of disk for dependencies (PyTorch, MuJoCo). Tested on macOS (Apple Silicon); Linux should work; Windows is untested.
+
+**Option 1: clone with git** (recommended)
+
+```bash
+git clone https://github.com/klasinlapaprechar/fly-muaythai.git
+cd fly-muaythai
+python3.12 -m venv .venv && source .venv/bin/activate
+pip install -e .
+python -m flymt.play
+```
+
+**Option 2: download a ZIP.** On the repo page, click **Code → Download ZIP**, unzip it, open a terminal in the folder, and run the same last three commands.
+
+If you use [uv](https://docs.astral.sh/uv/), the setup is faster: `uv venv --python 3.12 .venv && source .venv/bin/activate && uv pip install -e .`
+
 ```bash
 python -m flymt.play                  # hard: the final trained brain (update 2,000)
 python -m flymt.play --level medium   # update 500 (easy: update 100)
 python -m flymt.play --speed 0.2      # slower "fly time"
+python -m flymt.play --view third     # start over the shoulder
 ```
 
 | Keys | Action |
@@ -221,20 +242,18 @@ Most of the work was making the reward mean what we meant. Each of these showed 
 
 ---
 
-## Try it
+## Train it yourself
 
-Requires Python 3.11–3.12 (tested on macOS arm64) and a free [neuPrint](https://neuprint.janelia.org) token saved in `.env` as `NEUPRINT_APPLICATION_CREDENTIALS=...`.
+Training from scratch needs a free [neuPrint](https://neuprint.janelia.org) token saved in `.env` as `NEUPRINT_APPLICATION_CREDENTIALS=...`. Training takes about 15 hours on an 8 GB MacBook.
 
 ```bash
-uv venv --python 3.12 .venv && source .venv/bin/activate
-uv pip install -e ".[dev]"
-
-python -m flymt.connectome                       # build the circuit from the connectome (once)
-python -m flymt.ppo                              # train from scratch
+pip install -e ".[dev]"
+python -m flymt.connectome                       # build the circuit from the connectome
+python -m flymt.ppo                              # train from scratch (checkpoints/)
 python -m flymt.ppo --resume                     # continue from checkpoints/latest.pt
 python -m flymt.visualize --ckpt checkpoints/latest.pt --stage -1 --sample   # watch a bout
+python -m flymt.export_models                    # package your fighters into models/
 python -m flymt.moves_demo                       # render every move in slow motion
-python -m flymt.play                             # fight the trained fly yourself
 pytest -q                                        # smoke tests
 ```
 
@@ -249,16 +268,7 @@ pytest -q                                        # smoke tests
 | `flymt/arena.py`, `flymt/ik.py` | Two-fly ring and per-leg inverse kinematics |
 | `flymt/visualize.py`, `flymt/moves_demo.py` | Bout videos with live brain activity, and the move library |
 | `flymt/play.py` | Play mode: first-person fight against the trained brain |
-
-## Status
-
-- [x] Connectome circuit, physics, motor system, referee
-- [x] Recurrent PPO on Apple GPU with curriculum and self-play
-- [x] Full curriculum trained: orient → heavy bag → mover → sparring → mixed (veteran + self-play), 2,000 updates
-- [x] **Play mode** (`python -m flymt.play`): first person or over the shoulder, fly time, live brain panel, three difficulty levels
-- [ ] Final tournament against earlier versions and the veteran
-- [ ] Gamepad support for play mode
-- [ ] Larger circuit (~20–30K neurons, including the male-specific *fruitless* aggression neurons)
+| `flymt/export_models.py` | Packages trained fighters into `models/` |
 
 ## Credits
 
