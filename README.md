@@ -111,21 +111,43 @@ You play the blue fly. The red fly is the trained brain, and the panel on the ri
 
 The trained fighters ship with the repo in `models/` (about 1.4 MB), so there's no training and no neuPrint account needed to play.
 
-**Requirements:** Python 3.11 or 3.12 and about 2 GB of disk for dependencies (PyTorch, MuJoCo). Tested on macOS (Apple Silicon); Linux should work; Windows is untested.
+**Requirements:** macOS or Linux, git, and about 2 GB of disk for dependencies (PyTorch, MuJoCo). The game needs Python 3.11 or 3.12; Python 3.13 and newer won't install it. The steps below use [uv](https://docs.astral.sh/uv/), which downloads Python 3.12 for you, so it doesn't matter which Python you already have. Tested on macOS (Apple Silicon); Linux should work; Windows is untested.
 
-**Option 1: clone with git** (recommended)
+**1. Install uv** (one time), then close the terminal and open a new one so the `uv` command is found:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh     # or, with Homebrew: brew install uv
+```
+
+**2. Download and set up** (one time, a few minutes):
 
 ```bash
 git clone https://github.com/klasinlapaprechar/fly-muaythai.git
 cd fly-muaythai
-python3.12 -m venv .venv && source .venv/bin/activate
-pip install -e .
+uv venv --python 3.12 .venv
+source .venv/bin/activate
+uv pip install -e .
+```
+
+On a Mac, the first `git` command may ask to install the Command Line Tools. Click **Install**, wait for it to finish, then run the commands again. No git? On the repo page, click **Code → Download ZIP**, unzip it, open a terminal in the unzipped `fly-muaythai-main` folder, and run the last three commands.
+
+**3. Play:**
+
+```bash
 python -m flymt.play
 ```
 
-**Option 2: download a ZIP.** On the repo page, click **Code → Download ZIP**, unzip it, open a terminal in the folder, and run the same last three commands.
+The game opens in its own window. Click it before using the keys, since it can open behind your terminal or code editor.
 
-If you use [uv](https://docs.astral.sh/uv/), the setup is faster: `uv venv --python 3.12 .venv && source .venv/bin/activate && uv pip install -e .`
+**To play again later**, turn the environment back on first:
+
+```bash
+cd fly-muaythai                # the folder you downloaded
+source .venv/bin/activate      # your prompt now starts with (.venv)
+python -m flymt.play
+```
+
+Options:
 
 ```bash
 python -m flymt.play                  # hard: the final trained brain (update 2,000)
@@ -146,6 +168,17 @@ python -m flymt.play --view third     # start over the shoulder
 | G · P · R · Esc | Shadows (slower) · pause · new round · quit |
 
 The game runs in **"fly time"** (0.25× real speed by default), because a fly's jab takes ~90 ms, faster than human reaction. It renders at ~28 fps on an 8 GB MacBook.
+
+**If it doesn't start:**
+
+| You see | Fix |
+|---|---|
+| `command not found: uv` | Open a new terminal window after installing uv. |
+| `destination path 'fly-muaythai' already exists` | You already downloaded it. Skip `git clone` and run the rest of step 2 from the `cd fly-muaythai` line. |
+| `A virtual environment already exists at: .venv` | Replace the old one: `uv venv --clear --python 3.12 .venv`, then continue with step 2. |
+| `requires a different Python: 3.14… not in '<3.13,>=3.11'` | Plain `pip` ran with your system Python, which is too new. Use `uv pip install -e .` (step 2). |
+| `command not found: python` or `No module named 'mujoco'` | The environment is off. Run `source .venv/bin/activate` inside the `fly-muaythai` folder, then try again. |
+| The fly doesn't respond to keys | Click the game window first. |
 
 ---
 
@@ -247,7 +280,7 @@ Most of the work was making the reward mean what we meant. Each of these showed 
 Training from scratch needs a free [neuPrint](https://neuprint.janelia.org) token saved in `.env` as `NEUPRINT_APPLICATION_CREDENTIALS=...`. Training takes about 15 hours on an 8 GB MacBook.
 
 ```bash
-pip install -e ".[dev]"
+uv pip install -e ".[dev]"                       # in the environment from "Download and play"
 python -m flymt.connectome                       # build the circuit from the connectome
 python -m flymt.ppo                              # train from scratch (checkpoints/)
 python -m flymt.ppo --resume                     # continue from checkpoints/latest.pt
